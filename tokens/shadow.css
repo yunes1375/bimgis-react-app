@@ -1,0 +1,6 @@
+:root {
+  /* Deep, soft shadows for a dark UI — cards float on near-black */
+  --shadow-card: 0 12px 36px rgba(0, 0, 0, 0.32);
+  --shadow-pop:  0 2px 12px rgba(0, 0, 0, 0.5);
+  --shadow-fab:  0 6px 18px rgba(0, 0, 0, 0.55);
+}

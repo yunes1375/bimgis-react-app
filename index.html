@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BIM·GIS Platform — Atlas preview</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+html,body{margin:0;height:100%;background:var(--brand-bg-1);color:var(--brand-text);font-family:var(--font-body)}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px}
+h1{font-family:var(--font-head);font-weight:600;letter-spacing:-.01em;margin:0 0 6px}
+.tag{font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--brand-muted)}
+.lede{color:var(--brand-muted);margin:18px 0 32px;line-height:1.6;max-width:60ch}
+.sect{margin:28px 0 14px;font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--brand-faint)}
+.grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+a.card{display:block;padding:16px;background:var(--brand-surface);border:1px solid var(--brand-line);border-radius:6px;text-decoration:none;color:var(--brand-text);transition:border-color .12s,background .12s}
+a.card:hover{border-color:var(--brand-bim);background:var(--brand-surface-2)}
+a.card .name{font-family:var(--font-head);font-weight:600;font-size:15px;letter-spacing:-.005em}
+a.card .meta{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--brand-faint);margin-top:4px}
+.tier{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.chip{display:inline-flex;gap:5px;padding:2px 8px;border-radius:999px;font-family:var(--font-mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;border:1px solid rgba(54,224,212,.4);background:rgba(54,224,212,.14);color:var(--brand-bim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="tag">BIM·GIS PLATFORM / ATLAS PREVIEW</span>
+  <h1>Blueprint design system — live preview</h1>
+  <p class="lede">
+    Browse the React component library and the page screens produced by the design pipeline.
+    This is a static drop, intended for review on dev.bim-gis.com. Nothing here writes to a real backend yet.
+  </p>
+
+  <div class="tier">
+    <span class="chip">25 components</span>
+    <span class="chip">9 screens</span>
+    <span class="chip">6 token groups</span>
+    <span class="chip">Blueprint dark theme</span>
+  </div>
+
+  <div class="sect">Full product flow</div>
+  <div class="grid">
+    <a class="card" href="ui_kits/atlas/index.html">
+      <div class="name">Atlas — full app</div>
+      <div class="meta">Login → Projects → Project → Map → Models → Admin → AR → Account · Landing</div>
+    </a>
+  </div>
+
+  <div class="sect">Specimens</div>
+  <div class="grid">
+    <a class="card" href="foundations/colors-domain.html"><div class="name">Domain colors</div><div class="meta">BIM teal · GIS orange</div></a>
+    <a class="card" href="foundations/colors-status.html"><div class="name">Status colors</div><div class="meta">ok · warn · error</div></a>
+    <a class="card" href="foundations/colors-backgrounds.html"><div class="name">Backgrounds</div><div class="meta">bg-1..3 · surface · surface-2</div></a>
+    <a class="card" href="foundations/colors-text.html"><div class="name">Text colors</div><div class="meta">text · muted · faint</div></a>
+    <a class="card" href="foundations/type-display.html"><div class="name">Display type</div><div class="meta">Space Grotesk</div></a>
+    <a class="card" href="foundations/type-body.html"><div class="name">Body type</div><div class="meta">Inter</div></a>
+    <a class="card" href="foundations/type-mono.html"><div class="name">Mono type</div><div class="meta">IBM Plex Mono</div></a>
+    <a class="card" href="foundations/spacing-scale.html"><div class="name">Spacing scale</div><div class="meta">sp-1 .. sp-8</div></a>
+    <a class="card" href="foundations/spacing-radius.html"><div class="name">Radius</div><div class="meta">sm · md · lg · pill</div></a>
+    <a class="card" href="foundations/spacing-shadow.html"><div class="name">Shadows</div><div class="meta">card · pop · fab</div></a>
+    <a class="card" href="foundations/brand-grid.html"><div class="name">Signature grid</div><div class="meta">.bp-grid-backdrop</div></a>
+    <a class="card" href="foundations/brand-logo.html"><div class="name">Logo</div><div class="meta">brandmark + lockup</div></a>
+  </div>
+
+  <div class="sect">Docs</div>
+  <div class="grid">
+    <a class="card" href="readme.md"><div class="name">readme.md</div><div class="meta">setup · tokens · components</div></a>
+    <a class="card" href="SKILL.md"><div class="name">SKILL.md</div><div class="meta">Anthropic skill format</div></a>
+  </div>
+</div>
+</body>
+</html>

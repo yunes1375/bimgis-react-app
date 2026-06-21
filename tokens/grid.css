@@ -1,0 +1,14 @@
+/* Blueprint grid backdrop — fixed, behind everything, masked to fade out.
+   Drop <div class="bp-grid-backdrop"></div> as the first child of <body>. */
+.bp-grid-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--bp-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bp-grid) 1px, transparent 1px);
+  background-size: 30px 30px;
+  -webkit-mask-image: radial-gradient(135% 120% at 84% -10%, #000 0%, rgba(0,0,0,0.35) 52%, transparent 82%);
+          mask-image: radial-gradient(135% 120% at 84% -10%, #000 0%, rgba(0,0,0,0.35) 52%, transparent 82%);
+}

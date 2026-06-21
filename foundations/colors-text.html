@@ -1,0 +1,16 @@
+<!-- @dsCard group="Colors" viewport="700x160" name="Text & Lines" subtitle="Foreground ramp + hairlines" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin:0; padding:18px; background:var(--brand-bg-1); color:var(--brand-text); }
+  .lbl { font-family:var(--font-mono); font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--brand-faint); }
+  
+</style></head><body><div style="display:flex;flex-direction:column;gap:10px">
+  <div style="font-size:18px;color:var(--brand-text)">Primary text — #e8ecf1 <span class="lbl">brand-text</span></div>
+  <div style="font-size:16px;color:var(--brand-muted)">Muted text — #9aa7bd <span class="lbl">brand-muted</span></div>
+  <div style="font-size:15px;color:var(--brand-faint)">Faint text — #828ea3 <span class="lbl">brand-faint</span></div>
+  <div style="display:flex;gap:14px;margin-top:6px">
+    <div style="flex:1;height:30px;border:1px solid var(--brand-line);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center"><span class="lbl">line · 8%</span></div>
+    <div style="flex:1;height:30px;border:1px solid var(--brand-line-strong);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center"><span class="lbl">line-strong · 16%</span></div>
+  </div>
+</div></body></html>

@@ -1,0 +1,48 @@
+:root {
+  /* ---- Base palette --------------------------------------------------- */
+  /* Backgrounds: near-black blueprint navy, deepening back-to-front */
+  --brand-bg-1:        #090b11;
+  --brand-bg-2:        #0d1018;
+  --brand-bg-3:        #070910;
+  --brand-surface:     #11141d;
+  --brand-surface-2:   #161b27;
+
+  /* Hairlines: white at low alpha — the blueprint "ink" lines */
+  --brand-line:        rgba(255, 255, 255, 0.08);
+  --brand-line-strong: rgba(255, 255, 255, 0.16);
+
+  /* Text ramp */
+  --brand-text:   #e8ecf1;
+  --brand-muted:  #9aa7bd;
+  --brand-faint:  #828ea3;
+
+  /* Domain accents: BIM = teal, GIS = orange */
+  --brand-bim:    #36e0d4;
+  --brand-gis:    #ff9a52;
+  --brand-accent: #36e0d4;
+
+  /* Semantic status */
+  --brand-warn:   #f0c466;
+  --brand-error:  #ff7373;
+  --brand-ok:     #5bd0a0;
+
+  /* Blueprint grid ink (used by .bp-grid-backdrop) */
+  --bp-grid: rgba(110, 200, 215, 0.05);
+
+  /* ---- Semantic aliases ----------------------------------------------- */
+  --surface-page:    var(--brand-bg-1);
+  --surface-card:    var(--brand-surface);
+  --surface-raised:  var(--brand-surface-2);
+  --surface-sunken:  rgba(0, 0, 0, 0.22);
+
+  --text-strong:     var(--brand-text);
+  --text-body:       var(--brand-text);
+  --text-muted:      var(--brand-muted);
+  --text-faint:      var(--brand-faint);
+
+  --border-subtle:   var(--brand-line);
+  --border-strong:   var(--brand-line-strong);
+
+  --accent-bim:      var(--brand-bim);
+  --accent-gis:      var(--brand-gis);
+}

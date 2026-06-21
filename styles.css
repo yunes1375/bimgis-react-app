@@ -1,0 +1,16 @@
+/* =====================================================================
+   BIM·GIS Blueprint Design System — global entry point.
+   Consumers link this single file. It is an @import manifest only.
+   ===================================================================== */
+
+/* Foundations / tokens */
+@import './tokens/colors.css';
+@import './tokens/typography.css';
+@import './tokens/spacing.css';
+@import './tokens/radius.css';
+@import './tokens/shadow.css';
+@import './tokens/grid.css';
+
+/* Element base + component classes */
+@import './styles/base.css';
+@import './styles/components.css';

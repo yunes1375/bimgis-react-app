@@ -1,0 +1,12 @@
+# Defensive (this repo is static — no build step), but in case anyone
+# runs npm here later:
+node_modules/
+*.tgz
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# Local scratch
+.cache/
+.tmp/

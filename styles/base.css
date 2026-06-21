@@ -1,0 +1,32 @@
+/* Global base: resets + element defaults driven by tokens. */
+html, body {
+  margin: 0;
+  background: var(--brand-bg-1);
+  color: var(--brand-text);
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-head);
+  font-weight: var(--fw-semi);
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+code, kbd, samp, pre, .mono {
+  font-family: var(--font-mono);
+}
+
+/* Signature uppercase mono micro-label. */
+.micro {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--ls-micro);
+  text-transform: uppercase;
+  color: var(--brand-muted);
+}
+
+a { color: var(--brand-bim); }

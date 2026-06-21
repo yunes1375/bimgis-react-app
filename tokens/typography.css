@@ -1,0 +1,32 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
+
+:root {
+  /* Families: Space Grotesk = headings, Inter = body, IBM Plex Mono = labels/data */
+  --font-head: "Space Grotesk", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-body: "Inter", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", monospace;
+
+  /* Compact, dashboard-scale type ramp */
+  --fs-h1: 32px;
+  --fs-h2: 22px;
+  --fs-h3: 16px;
+  --fs-body: 14px;
+  --fs-small: 13px;
+  --fs-micro: 11px;
+
+  --lh-tight: 1.15; /* @kind font */
+  --lh-body:  1.55; /* @kind font */
+
+  --fw-regular: 400; /* @kind font */
+  --fw-medium:  500; /* @kind font */
+  --fw-semi:    600; /* @kind font */
+  --fw-bold:    700; /* @kind font */
+
+  /* Uppercase mono micro-labels are a signature motif */
+  --ls-micro: 0.08em;
+
+  /* Semantic aliases */
+  --text-display: var(--font-head);
+  --text-ui:      var(--font-body);
+  --text-data:    var(--font-mono);
+}

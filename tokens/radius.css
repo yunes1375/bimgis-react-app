@@ -1,0 +1,7 @@
+:root {
+  /* Tight, technical radii — nothing rounder than 6px except pills */
+  --r-sm: 3px;
+  --r-md: 4px;
+  --r-lg: 6px;
+  --r-pill: 999px;
+}
