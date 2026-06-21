@@ -23,7 +23,13 @@ function deriveWho(user) {
   const initials = (user.display_name || user.full_name
     ? (user.display_name || user.full_name).split(/\s+/).map(s => s[0]).slice(0, 2).join('')
     : (user.email || 'U')[0]).toUpperCase();
-  return { name, initials, email: user.email, role: user.is_admin ? 'admin' : 'member', href: '#account' };
+  return {
+    name, initials, email: user.email,
+    role: user.is_admin ? 'admin' : 'member',
+    is_admin: !!user.is_admin,
+    id: user.id,
+    href: '#account',
+  };
 }
 
 function App() {
