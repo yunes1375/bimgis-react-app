@@ -64,6 +64,161 @@ function _fmtArrival(s) {
 function _teamColor(i) { return `hsl(${(i * 137.5) % 360}, 60%, 60%)`; }
 const _PRIO_DOT = { urgent: '#e8a060', high: '#fec060', normal: '#6a9be8', low: '#7a8aa8' };
 
+// ─── Leaflet helpers ─────────────────────────────────────────────────────
+// Leaflet is loaded once in index.html (window.L). These two helpers wrap
+// it for use from React effects — we still talk to Leaflet imperatively
+// (clearLayers / setView etc.) so route/layer updates don't re-mount the
+// map, which would flash a blank canvas every render.
+
+function _useLeafletMap(divRef, opts) {
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!divRef.current || !window.L || ref.current) return;
+    const L = window.L;
+    const m = L.map(divRef.current, { zoomControl: true, attributionControl: true })
+      .setView((opts && opts.center) || [35.7, 51.4], (opts && opts.zoom) || 11);
+    // Carto Positron — light, neutral basemap. No API key required.
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+      subdomains: 'abcd', maxZoom: 19,
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OSM</a> · © <a href="https://carto.com/attributions">CARTO</a>',
+    }).addTo(m);
+    ref.current = m;
+    // Force a redraw once the container settles (especially when shown
+    // inside a collapsed tab that just expanded).
+    setTimeout(() => m.invalidateSize(), 50);
+    return () => { m.remove(); ref.current = null; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return ref;
+}
+
+function RouteMap({ routes, height = 380 }) {
+  const divRef = React.useRef(null);
+  const mapRef = _useLeafletMap(divRef);
+  const layerRef = React.useRef(null);
+  React.useEffect(() => {
+    const map = mapRef.current; if (!map || !window.L) return;
+    const L = window.L;
+    if (!layerRef.current) layerRef.current = L.layerGroup().addTo(map);
+    layerRef.current.clearLayers();
+    const bounds = [];
+    (routes || []).forEach((r, i) => {
+      const colour = _teamColor(i);
+      // Team home (depot)
+      if (r.team_lat != null && r.team_lon != null) {
+        const homeIcon = L.divIcon({
+          className: 'rm-home-icon',
+          html: `<div style="width:14px;height:14px;background:${colour};
+                  border:2px solid white;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,0.6)"></div>`,
+          iconSize: [14, 14], iconAnchor: [7, 7],
+        });
+        L.marker([r.team_lat, r.team_lon], { icon: homeIcon, title: r.team_name || `Team ${i + 1}` })
+          .addTo(layerRef.current).bindTooltip(`<b>${r.team_name || `Team ${i+1}`}</b><br>depot`, { direction: 'top' });
+        bounds.push([r.team_lat, r.team_lon]);
+      }
+      // Stops + polyline
+      const stops = (r.stops || []).filter(s => s.lat != null && s.lon != null);
+      if (stops.length > 0 && r.team_lat != null && r.team_lon != null) {
+        const path = [[r.team_lat, r.team_lon], ...stops.map(s => [s.lat, s.lon])];
+        L.polyline(path, { color: colour, weight: 3, opacity: 0.85, lineCap: 'round', lineJoin: 'round' })
+          .addTo(layerRef.current);
+        path.forEach(p => bounds.push(p));
+      }
+      stops.forEach((s, k) => {
+        const urg = s.priority === 'urgent', high = s.priority === 'high';
+        const radius = urg ? 11 : (high ? 9 : 7);
+        const wo = s.work_order_number || (s.work_order_id ? s.work_order_id.slice(0, 8) : '?');
+        const stopIcon = L.divIcon({
+          className: 'rm-stop-icon',
+          html: `<div style="width:${radius*2}px;height:${radius*2}px;background:${colour};
+                  border:${urg?3:high?2:1}px solid ${urg?'#f06868':high?'#e8a060':'white'};
+                  border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,0.5);
+                  color:#0c1320;font-weight:700;font-size:10px;
+                  display:flex;align-items:center;justify-content:center;
+                  font-family:var(--font-mono,ui-monospace,monospace)">${k+1}</div>`,
+          iconSize: [radius*2, radius*2], iconAnchor: [radius, radius],
+        });
+        L.marker([s.lat, s.lon], { icon: stopIcon })
+          .addTo(layerRef.current)
+          .bindTooltip(`<b>#${k+1} · ${wo}</b><br>${s.name || ''}<br>priority: ${s.priority || '?'}${s.arrival_s != null ? `<br>arrives ${_fmtArrival(s.arrival_s)}` : ''}`, { direction: 'top' });
+      });
+    });
+    if (bounds.length > 0) map.fitBounds(bounds, { padding: [25, 25], maxZoom: 16 });
+  }, [routes, mapRef]);
+
+  if (!window.L) {
+    return (
+      <div style={{ height, padding: 20, textAlign: 'center', color: 'var(--brand-muted)', background: 'var(--brand-bg-2)', borderRadius: 'var(--r-md)' }}>
+        Leaflet failed to load — refresh the page to retry.
+      </div>
+    );
+  }
+  return <div ref={divRef} style={{ width: '100%', height, borderRadius: 'var(--r-md)', overflow: 'hidden', background: '#1c222d' }} />;
+}
+
+function LayerPreviewMap({ project, overlays, height = 340 }) {
+  const divRef = React.useRef(null);
+  const mapRef = _useLeafletMap(divRef);
+  const layerRef = React.useRef(null);
+  const cacheRef = React.useRef({});
+
+  React.useEffect(() => {
+    const map = mapRef.current; if (!map || !window.L) return;
+    const L = window.L;
+    if (!layerRef.current) layerRef.current = L.layerGroup().addTo(map);
+    layerRef.current.clearLayers();
+    const visible = (overlays || []).filter(l => l.visible);
+    if (visible.length === 0) return;
+    const palette = ['#36e0d4', '#ff9a52', '#6a9be8', '#e870c2', '#a0e060', '#fec060'];
+    const allBounds = [];
+    let cancelled = false;
+    (async () => {
+      for (let i = 0; i < visible.length; i++) {
+        const l = visible[i];
+        const color = palette[i % palette.length];
+        let geo = cacheRef.current[l.id];
+        if (!geo) {
+          try {
+            const r = await fetch(`/projects/${project.id}/gis-layers/${l.id}/export`);
+            if (!r.ok) continue;
+            geo = await r.json();
+            cacheRef.current[l.id] = geo;
+          } catch { continue; }
+        }
+        if (cancelled || !geo) continue;
+        try {
+          const gj = L.geoJSON(geo, {
+            style: () => ({ color, weight: 2, opacity: 0.85, fillOpacity: 0.25, fillColor: color }),
+            pointToLayer: (_f, latlng) => L.circleMarker(latlng, { radius: 4, color, fillColor: color, fillOpacity: 0.8, weight: 1 }),
+            onEachFeature: (f, lyr) => {
+              if (f.properties) {
+                const lbl = f.properties.name || f.properties.id || l.name;
+                lyr.bindTooltip(String(lbl), { sticky: true });
+              }
+            },
+          }).addTo(layerRef.current);
+          const b = gj.getBounds();
+          if (b.isValid()) {
+            allBounds.push([b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]);
+            // Refit progressively so first layer shows immediately
+            map.fitBounds(allBounds, { padding: [20, 20], maxZoom: 16 });
+          }
+        } catch { /* skip bad layer */ }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [project.id, overlays, mapRef]);
+
+  if (!window.L) {
+    return (
+      <div style={{ height, padding: 20, textAlign: 'center', color: 'var(--brand-muted)', background: 'var(--brand-bg-2)', borderRadius: 'var(--r-md)' }}>
+        Leaflet failed to load — refresh the page to retry.
+      </div>
+    );
+  }
+  return <div ref={divRef} style={{ width: '100%', height, borderRadius: 'var(--r-md)', overflow: 'hidden', background: '#1c222d' }} />;
+}
+
 // ─── Tab panels ───────────────────────────────────────────────────────────
 
 function OverviewPanel({ project, models, modelsLoading, overlays, overlaysLoading }) {
@@ -1131,6 +1286,11 @@ function OptimizePanel({ project, push }) {
             {runId && <span className="micro" style={{ marginLeft: 'auto' }}>run_id: {runId.toString().slice(0, 8)}</span>}
           </div>
 
+          {/* ── 2D route map (Leaflet) ── */}
+          <div style={{ marginBottom: 14 }}>
+            <RouteMap routes={routes} />
+          </div>
+
           {/* ── Per-team route cards ── */}
           {routes.map((r, i) => <_TeamRouteCard key={r.team_id || i} route={r} idx={i} />)}
         </Card>
@@ -1174,10 +1334,108 @@ function OptimizePanel({ project, push }) {
   );
 }
 
+// ─── GeoServer card (admin only) ─────────────────────────────────────────
+function GeoServerCard({ project, push, refresh }) {
+  const [state, setState]   = React.useState({ loading: true, layers: [], workspace: 'propos', error: null });
+  const [picked, setPicked] = React.useState('');
+  const [name, setName]     = React.useState('');
+  const [busy, setBusy]     = React.useState(false);
+
+  React.useEffect(() => {
+    (async () => {
+      setState(s => ({ ...s, loading: true }));
+      try {
+        const data = await _api('/admin/geoserver/layers');
+        setState({ loading: false, layers: data.layers || [], workspace: data.workspace || 'propos', error: null });
+      } catch (err) {
+        setState({ loading: false, layers: [], workspace: 'propos', error: err.message });
+      }
+    })();
+  }, []);
+
+  const apiOrigin = (window.PROPOS_CONFIG && window.PROPOS_CONFIG.apiBase) || window.location.origin;
+  const wmsUrl = `${apiOrigin}/geoserver/${state.workspace}/wms?service=WMS&version=1.3.0&request=GetCapabilities`;
+  const wfsUrl = `${apiOrigin}/geoserver/${state.workspace}/wfs?service=WFS&version=2.0.0&request=GetCapabilities`;
+
+  async function copy(url, label) {
+    try {
+      await navigator.clipboard.writeText(url);
+      push({ tone: 'success', title: `${label} URL copied` });
+    } catch {
+      push({ tone: 'error', title: 'Could not copy', description: 'Clipboard access denied — copy from address bar instead.' });
+    }
+  }
+
+  async function importFromGs(e) {
+    e.preventDefault();
+    if (!picked) return;
+    setBusy(true);
+    try {
+      const data = await _api(`/projects/${project.id}/gis-layers/from-geoserver`, {
+        method: 'POST',
+        body: JSON.stringify({ workspace: state.workspace, layer: picked, name: name.trim() || null, model_id: null }),
+      });
+      const layer = data && data.layer;
+      push({ tone: 'success', title: 'Imported from GeoServer',
+        description: layer ? `${layer.name}${data.features_added != null ? ` · ${data.features_added} features` : ''}` : picked });
+      setPicked(''); setName('');
+      refresh();
+    } catch (err) {
+      push({ tone: 'error', title: 'Import failed', description: err.message });
+    } finally { setBusy(false); }
+  }
+
+  async function resync() {
+    if (!window.confirm(`Re-publish every layer of this project to GeoServer?\n\nUseful after editing features directly in QGIS / psql so the WMS extent stays in sync.`)) return;
+    setBusy(true);
+    try {
+      const r = await fetch(`/projects/${project.id}/gis-layers/resync`, { method: 'POST' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json().catch(() => ({}));
+      push({ tone: 'success', title: 'GeoServer re-sync started',
+        description: d.published != null ? `${d.published} layer(s) published` : undefined });
+    } catch (err) {
+      push({ tone: 'error', title: 'Re-sync failed', description: err.message });
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <Card title="GeoServer"
+      subtitle={`OGC services for the "${state.workspace}" workspace · your propos credentials are also your GeoServer login`}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+        <Button size="sm" variant="ghost" leftIcon="↗"
+          onClick={() => window.open(`${apiOrigin}/geoserver/web/`, '_blank', 'noopener')}>
+          Open GeoServer admin
+        </Button>
+        <Button size="sm" variant="ghost" leftIcon="⎘" onClick={() => copy(wmsUrl, 'WMS GetCapabilities')}>Copy WMS URL</Button>
+        <Button size="sm" variant="ghost" leftIcon="⎘" onClick={() => copy(wfsUrl, 'WFS GetCapabilities')}>Copy WFS URL</Button>
+        <Button size="sm" variant="ghost" leftIcon="⟳" disabled={busy} onClick={resync}>Re-sync layers</Button>
+      </div>
+      <form onSubmit={importFromGs} style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', paddingTop: 12, borderTop: '1px solid var(--brand-line)' }}>
+        <div style={{ flex: 2, minWidth: 220 }}>
+          <label className="micro" style={{ display: 'block', marginBottom: 4 }}>Reference a GeoServer layer</label>
+          <select value={picked} onChange={(e) => setPicked(e.target.value)} disabled={busy || state.loading}
+            style={{ width: '100%', padding: '8px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>
+            <option value="">{state.loading ? 'loading…' : state.layers.length === 0 ? 'no layers in workspace yet' : '— choose layer —'}</option>
+            {state.layers.map(l => <option key={l.name} value={l.name}>{l.name}</option>)}
+          </select>
+        </div>
+        <div style={{ flex: 1, minWidth: 160 }}>
+          <Input label="Local name (optional)" placeholder="defaults to the GS layer name" value={name} onChange={(e) => setName(e.target.value)} fullWidth />
+        </div>
+        <Button type="submit" variant="primary" loading={busy} disabled={!picked || busy}>Add reference</Button>
+      </form>
+      {state.error && <div style={{ marginTop: 10, color: 'var(--brand-error, #f88)', fontSize: 12 }}>{state.error}</div>}
+    </Card>
+  );
+}
+
 // ─── GIS overlays tab — list + toggle + add (file + URL) + routing + download + delete ──
-function OverlaysPanel({ project, overlays, loading, push, refresh }) {
+function OverlaysPanel({ project, overlays, loading, push, refresh, who }) {
+  const isAdmin = !!(who && who.is_admin);
   const [pendingId, setPendingId]   = React.useState(null);  // for toggle / mark / download / delete
   const [addMode, setAddMode]       = React.useState(null);  // null | 'url' | 'file'
+  const [showMap, setShowMap]       = React.useState(true);
   const [url, setUrl]               = React.useState('');
   const [name, setName]             = React.useState('');
   const [file, setFile]             = React.useState(null);
@@ -1388,14 +1646,25 @@ function OverlaysPanel({ project, overlays, loading, push, refresh }) {
   }
 
   return (
-    <Card title="GIS overlays"
-      subtitle={`${overlays.length} layer${overlays.length === 1 ? '' : 's'} on this project`}
-      action={
-        <div style={{ display: 'flex', gap: 6 }}>
-          <Button size="sm" variant="ghost"   leftIcon="↥" onClick={() => setAddMode('file')}>Upload file</Button>
-          <Button size="sm" variant="primary" leftIcon="+" onClick={() => setAddMode('url')}>From URL</Button>
-        </div>
-      } dense>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {isAdmin && <GeoServerCard project={project} push={push} refresh={refresh} />}
+
+      {overlays.length > 0 && (
+        <Card title="Preview map"
+          subtitle="2D preview of every visible layer · toggle layers in the list below to show/hide them"
+          action={<Button size="sm" variant="ghost" onClick={() => setShowMap(s => !s)}>{showMap ? 'Hide' : 'Show'}</Button>}>
+          {showMap && <LayerPreviewMap project={project} overlays={overlays} />}
+        </Card>
+      )}
+
+      <Card title="GIS overlays"
+        subtitle={`${overlays.length} layer${overlays.length === 1 ? '' : 's'} on this project`}
+        action={
+          <div style={{ display: 'flex', gap: 6 }}>
+            <Button size="sm" variant="ghost"   leftIcon="↥" onClick={() => setAddMode('file')}>Upload file</Button>
+            <Button size="sm" variant="primary" leftIcon="+" onClick={() => setAddMode('url')}>From URL</Button>
+          </div>
+        } dense>
       {overlays.length === 0 ? (
         <div style={{ padding: 28, textAlign: 'center', color: 'var(--brand-muted)' }}>
           <div className="micro" style={{ marginBottom: 8 }}>NO OVERLAYS YET</div>
@@ -1435,7 +1704,8 @@ function OverlaysPanel({ project, overlays, loading, push, refresh }) {
           })}
         </ul>
       )}
-    </Card>
+      </Card>
+    </div>
   );
 }
 
@@ -1589,7 +1859,7 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
             description="Pick a project from the Projects page to see its details."
             action={<Button variant="primary" onClick={() => { window.location.hash = 'projects'; }}>Back to Projects</Button>} />
         </main>
-        <Footer brand="BIM·GIS Platform · 2026" right={<span>v0.5.1</span>} />
+        <Footer brand="BIM·GIS Platform · 2026" right={<span>v0.6.0</span>} />
       </div>
     );
   }
@@ -1638,13 +1908,13 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
         {tab === 'teams'     && <TeamsPanel project={project} push={push} />}
         {tab === 'orders'    && <OrdersPanel project={project} push={push} onOpenMap={onOpenMap} />}
         {tab === 'optimize'  && <OptimizePanel project={project} push={push} />}
-        {tab === 'overlays'  && <OverlaysPanel project={project} overlays={overlays.items} loading={overlays.loading} push={push} refresh={loadOverlays} />}
+        {tab === 'overlays'  && <OverlaysPanel project={project} overlays={overlays.items} loading={overlays.loading} push={push} refresh={loadOverlays} who={who} />}
         {tab === 'sharing'   && <SharingPanel project={project} who={who} push={push} />}
       </main>
 
       <Footer brand="BIM·GIS Platform · 2026"
         links={[{ href: '#privacy', label: 'Privacy' }, { href: '#status', label: 'Status' }, { href: '#api', label: 'API' }]}
-        right={<span>v0.5.1</span>} />
+        right={<span>v0.6.0</span>} />
 
       <ToastStack>
         {toasts.map(t => <Toast key={t.id} tone={t.tone} title={t.title} description={t.description} onClose={() => setToasts(ts => ts.filter(x => x.id !== t.id))} />)}
