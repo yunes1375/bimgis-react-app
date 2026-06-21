@@ -52,15 +52,158 @@ function Avatar({ name }) {
   );
 }
 
+// ─── Credentials modal — shown once when a GS/PG account is provisioned ─
+function CredentialsModal({ open, kind, data, onClose }) {
+  React.useEffect(() => {
+    if (!open) return;
+    const onEsc = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onEsc);
+    return () => document.removeEventListener('keydown', onEsc);
+  }, [open, onClose]);
+  if (!open || !data) return null;
+
+  const fields = kind === 'geoserver'
+    ? [['URL', data.url || ''], ['Username', data.username || ''], ['Password', data.password || '']]
+    : [['Host', data.host || ''], ['Port', String(data.port || '')], ['Database', data.database || ''],
+       ['Username', data.username || ''], ['Password', data.password || ''], ['SSL mode', data.ssl_mode || '']];
+
+  async function copy(value) {
+    try { await navigator.clipboard.writeText(value); }
+    catch { /* user can select manually */ }
+  }
+
+  return (
+    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(2px)',
+      zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+    }}>
+      <div style={{
+        background: 'var(--brand-surface)', border: '1px solid var(--brand-line-strong)',
+        borderRadius: 'var(--r-lg)', width: 'min(560px, 100%)', boxShadow: 'var(--shadow-card)',
+      }} role="dialog" aria-modal="true">
+        <header style={{
+          padding: '14px 16px', borderBottom: '1px solid var(--brand-line)',
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: kind === 'geoserver'
+            ? 'linear-gradient(135deg, rgba(54,224,212,0.18), rgba(54,224,212,0.04))'
+            : 'linear-gradient(135deg, rgba(106,155,232,0.18), rgba(106,155,232,0.04))',
+        }}>
+          <span style={{
+            width: 36, height: 36, borderRadius: 'var(--r-md)', flexShrink: 0,
+            background: kind === 'geoserver' ? 'linear-gradient(135deg, #36e0d4, #1f9fa0)' : 'linear-gradient(135deg, #6a9be8, #3f6db3)',
+            color: '#06121a', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14,
+          }}>{kind === 'geoserver' ? 'GS' : 'PG'}</span>
+          <div style={{ flex: 1 }}>
+            <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontSize: 'var(--fs-h3)', fontWeight: 600 }}>
+              {kind === 'geoserver' ? 'GeoServer credentials' : 'PostGIS credentials'}
+            </h3>
+            <div className="micro" style={{ marginTop: 2 }}>
+              for {data.email}{data.rotated && ' · ⚠ previous password rotated'}
+            </div>
+          </div>
+          <button onClick={onClose} aria-label="Close" style={{ background: 'transparent', border: '1px solid var(--brand-line-strong)', color: 'var(--brand-muted)', borderRadius: 'var(--r-md)', width: 28, height: 28, fontSize: 18, cursor: 'pointer' }}>×</button>
+        </header>
+
+        <div style={{ padding: 16 }}>
+          <div style={{ padding: '8px 12px', marginBottom: 14, background: 'rgba(255,154,82,0.10)', border: '1px solid rgba(255,154,82,0.35)', borderRadius: 'var(--r-md)', color: '#ffd1a8', fontSize: 12 }}>
+            ⚠ Copy these credentials NOW — the password is shown only once. Closing this dialog hides it forever.
+          </div>
+
+          <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: 'auto 1fr auto', rowGap: 8, columnGap: 12, alignItems: 'center' }}>
+            {fields.map(([k, v]) => (
+              <React.Fragment key={k}>
+                <dt className="micro" style={{ alignSelf: 'center' }}>{k}</dt>
+                <dd style={{ margin: 0, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--brand-text)',
+                  padding: '6px 10px', background: 'var(--brand-bg-2)', border: '1px solid var(--brand-line)',
+                  borderRadius: 'var(--r-sm)', overflow: 'auto', whiteSpace: 'nowrap' }}>{v || '—'}</dd>
+                <button type="button" onClick={() => copy(v)} title={`Copy ${k}`}
+                  style={{ background: 'transparent', border: '1px solid var(--brand-line-strong)',
+                    color: 'var(--brand-muted)', borderRadius: 'var(--r-sm)', padding: '4px 8px',
+                    fontSize: 11, cursor: 'pointer', fontFamily: 'var(--font-mono)' }}>⎘ copy</button>
+              </React.Fragment>
+            ))}
+          </dl>
+
+          {kind === 'postgis' && (
+            <div style={{ marginTop: 14, padding: 10, background: 'var(--brand-bg-2)', borderRadius: 'var(--r-md)', fontSize: 11, color: 'var(--brand-muted)', lineHeight: 1.55 }}>
+              <strong style={{ color: 'var(--brand-text)' }}>QGIS:</strong> Browser panel → PostgreSQL → New Connection.
+              Paste the fields above. Test → Save.
+            </div>
+          )}
+          {kind === 'geoserver' && (
+            <div style={{ marginTop: 14, padding: 10, background: 'var(--brand-bg-2)', borderRadius: 'var(--r-md)', fontSize: 11, color: 'var(--brand-muted)', lineHeight: 1.55 }}>
+              ADMIN role granted on GeoServer. Use the credentials at the URL above to publish layers or edit styles.
+            </div>
+          )}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+            <Button variant="primary" onClick={onClose}>I've saved them</Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── All-projects card (admin-only) ───────────────────────────────────────
+function AllProjectsCard({ mobile }) {
+  const [state, setState] = React.useState({ loading: true, projects: [], error: null });
+  const load = React.useCallback(async () => {
+    setState(s => ({ ...s, loading: true }));
+    try {
+      const data = await _api('/admin/projects');
+      setState({ loading: false, projects: data.projects || [], error: null });
+    } catch (err) {
+      setState({ loading: false, projects: [], error: err.message });
+    }
+  }, []);
+  React.useEffect(() => { load(); }, [load]);
+
+  const cols = [
+    { key: 'name', header: 'Project', render: r => (
+      <a href={`#project/${r.id}`} onClick={(e) => { e.preventDefault(); window.location.hash = `project/${r.id}`; }}
+         style={{ color: 'var(--brand-text)', fontWeight: 600, textDecoration: 'none', borderBottom: '1px solid var(--brand-line-strong)' }}>{r.name}</a>
+    ) },
+    { key: 'owner_email', header: 'Owner', render: r => r.owner_email
+      ? <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.owner_email}</span>
+      : <Pill tone="warn">ownerless</Pill> },
+    { key: 'model_count', header: 'Models', align: 'end', render: r => <span style={{ fontFamily: 'var(--font-mono)' }}>{r.model_count ?? 0}</span> },
+    { key: 'created_at', header: 'Created', align: 'end', render: r => <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--brand-muted)' }}>{_fmtRelative(r.created_at)}</span> },
+    { key: 'id', header: 'ID', render: r => <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--brand-faint)' }}>{(r.id || '').slice(0, 8)}</span> },
+  ];
+
+  return (
+    <Card title="All projects"
+      subtitle={state.loading ? 'loading…' : `${state.projects.length} project${state.projects.length === 1 ? '' : 's'} across every owner`}
+      action={<Button size="sm" variant="ghost" onClick={load} disabled={state.loading}>Refresh</Button>}>
+      {state.loading ? (
+        <div style={{ padding: 30, textAlign: 'center' }}><Spinner size="sm" /></div>
+      ) : state.error ? (
+        <div style={{ padding: 20, textAlign: 'center', color: 'var(--brand-error, #f88)', fontSize: 13 }}>{state.error}</div>
+      ) : state.projects.length === 0 ? (
+        <EmptyState icon="◇" title="No projects yet" description="When users create projects, they appear here." />
+      ) : mobile ? (
+        <StackedCardTable columns={cols} rows={state.projects} rowKey={r => r.id} />
+      ) : (
+        <DataTable columns={cols} rows={state.projects} rowKey={r => r.id} caption={`${state.projects.length} projects`} />
+      )}
+    </Card>
+  );
+}
+
 function AdminScreen({ who, nav, onMenu }) {
   const mobile = _useIsMobileA();
   const [state, setState] = React.useState({ loading: true, error: null, users: [] });
   const [busyId, setBusyId] = React.useState(null);
+  const [busyKey, setBusyKey] = React.useState(null);  // composite: `${userId}:${action}`
   const [email, setEmail] = React.useState('');
   const [displayName, setDisplayName] = React.useState('');
   const [isAdmin, setIsAdmin] = React.useState(false);
   const [inviteBusy, setInviteBusy] = React.useState(false);
   const [inviteErr, setInviteErr] = React.useState('');
+  const [credModal, setCredModal] = React.useState({ open: false, kind: null, data: null });
+  const [ownerlessBusy, setOwnerlessBusy] = React.useState(false);
   const [toasts, setToasts] = React.useState([]);
   const push = (t) => {
     const id = Math.random().toString(36).slice(2);
@@ -113,40 +256,70 @@ function AdminScreen({ who, nav, onMenu }) {
       load();
     } catch (err) {
       push({ tone: 'error', title: 'Role update failed', description: err.message });
-    } finally {
-      setBusyId(null);
-    }
+    } finally { setBusyId(null); }
   };
 
   const resetPassword = async (u) => {
-    setBusyId(u.id);
+    if (!window.confirm(`Reset password for ${u.email}?\n\nThey will receive a fresh temporary password that you must hand them out of band.`)) return;
+    setBusyKey(`${u.id}:reset`);
     try {
       const out = await _api(`/admin/users/${u.id}/reset-password`, { method: 'POST' });
-      const tempPw = out && (out.temp_password || out.password || out.new_password);
-      push({
-        tone: 'success',
-        title: 'Reset link sent',
-        description: tempPw ? `Temp password: ${tempPw}` : u.email,
-      });
+      const tempPw = out && (out.temporary_password || out.temp_password || out.password || out.new_password);
+      if (tempPw) {
+        window.prompt(`Temporary password for ${out.email || u.email}:\n(copy it now; this dialog is the only place it will appear.)`, tempPw);
+      }
+      push({ tone: 'success', title: 'Password reset', description: `share the temp password with ${u.email}` });
     } catch (err) {
       push({ tone: 'error', title: 'Reset failed', description: err.message });
-    } finally {
-      setBusyId(null);
-    }
+    } finally { setBusyKey(null); }
   };
 
   const removeUser = async (u) => {
-    if (!window.confirm(`Remove ${u.email}? This cannot be undone.`)) return;
-    setBusyId(u.id);
+    if (!window.confirm(`Delete ${u.email}?\n\nTheir projects will become ownerless (you can claim them with the "Claim ownerless" button above).`)) return;
+    setBusyKey(`${u.id}:delete`);
     try {
       await _api(`/admin/users/${u.id}`, { method: 'DELETE' });
       push({ tone: 'success', title: 'User removed', description: u.email });
       load();
     } catch (err) {
       push({ tone: 'error', title: 'Remove failed', description: err.message });
-    } finally {
-      setBusyId(null);
-    }
+    } finally { setBusyKey(null); }
+  };
+
+  const provisionGs = async (u) => {
+    if (!window.confirm(`Provision or rotate the GeoServer account for ${u.email}?\n\nThis creates a matching user on GeoServer with ADMIN role and shows the new password ONCE. If a previous GeoServer password was issued, this rotates it.`)) return;
+    setBusyKey(`${u.id}:gs`);
+    try {
+      const data = await _api(`/admin/users/${u.id}/geoserver-credentials`, { method: 'POST' });
+      setCredModal({ open: true, kind: 'geoserver', data: { ...data, email: data.email || u.email } });
+      push({ tone: 'success', title: `GeoServer access ${data.rotated ? 'rotated' : 'granted'}`, description: u.email });
+    } catch (err) {
+      push({ tone: 'error', title: 'Provision failed', description: err.message });
+    } finally { setBusyKey(null); }
+  };
+
+  const provisionPg = async (u) => {
+    if (!window.confirm(`Provision or rotate the Postgres login role for ${u.email}?\n\nThis creates a role with SELECT/INSERT/UPDATE/DELETE on vector_layer + vector_feature and shows the new password ONCE. If a previous Postgres password was issued, this rotates it.`)) return;
+    setBusyKey(`${u.id}:pg`);
+    try {
+      const data = await _api(`/admin/users/${u.id}/postgis-credentials`, { method: 'POST' });
+      setCredModal({ open: true, kind: 'postgis', data: { ...data, email: data.email || u.email } });
+      push({ tone: 'success', title: `PostGIS access ${data.rotated ? 'rotated' : 'granted'}`, description: u.email });
+    } catch (err) {
+      push({ tone: 'error', title: 'Provision failed', description: err.message });
+    } finally { setBusyKey(null); }
+  };
+
+  const claimOwnerless = async () => {
+    if (!window.confirm(`Assign every ownerless project to you?\n\nAfter this, you'll be the owner (and can manage sharing for) all projects with no current owner.`)) return;
+    setOwnerlessBusy(true);
+    try {
+      const data = await _api('/admin/migrate-ownerless', { method: 'POST' });
+      const n = (data && (data.claimed != null ? data.claimed : data.count != null ? data.count : null));
+      push({ tone: 'success', title: 'Ownerless projects claimed', description: n != null ? `${n} project(s) reassigned to you` : undefined });
+    } catch (err) {
+      push({ tone: 'error', title: 'Claim failed', description: err.message });
+    } finally { setOwnerlessBusy(false); }
   };
 
   const cols = [
@@ -165,13 +338,16 @@ function AdminScreen({ who, nav, onMenu }) {
   ];
   const actions = r => {
     const me = who && r.email === who.email;
+    const busy = busyId === r.id || (busyKey && busyKey.startsWith(`${r.id}:`));
     return (
       <React.Fragment>
-        <Button size="sm" variant="ghost" disabled={busyId === r.id} onClick={() => resetPassword(r)}>Reset password</Button>
-        <Button size="sm" variant="ghost" disabled={busyId === r.id || me} onClick={() => toggleAdmin(r)}>
-          {r.is_admin ? 'Demote to member' : 'Promote to admin'}
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => resetPassword(r)}>Reset pwd</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => provisionGs(r)}>GS creds</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => provisionPg(r)}>PG creds</Button>
+        <Button size="sm" variant="ghost" disabled={busy || me} onClick={() => toggleAdmin(r)}>
+          {r.is_admin ? 'Demote' : 'Promote'}
         </Button>
-        <Button size="sm" variant="ghost" disabled={busyId === r.id || me} onClick={() => removeUser(r)}>Remove</Button>
+        <Button size="sm" variant="ghost" disabled={busy || me} onClick={() => removeUser(r)}>Remove</Button>
       </React.Fragment>
     );
   };
@@ -181,16 +357,22 @@ function AdminScreen({ who, nav, onMenu }) {
       <SiteHeader brand="BIM·GIS" tag="Platform" onMenuClick={onMenu}
         nav={nav || [{ href: '#admin', label: 'Admin', active: true }]} who={who} />
 
-      <main style={{ flex: 1, maxWidth: 1080, width: '100%', margin: '0 auto', padding: '28px 24px 40px', boxSizing: 'border-box' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, marginBottom: 20, flexWrap: 'wrap' }}>
+      <main style={{ flex: 1, maxWidth: 1080, width: '100%', margin: '0 auto', padding: '28px 24px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
           <div>
             <div className="micro" style={{ marginBottom: 6 }}>Administration</div>
-            <h1 style={{ fontSize: 'var(--fs-h1)', margin: 0 }}>Users &amp; roles</h1>
+            <h1 style={{ fontSize: 'var(--fs-h1)', margin: 0 }}>Users &amp; projects</h1>
           </div>
-          {!state.loading && !state.error && <Pill tone="neutral">{state.users.length} members</Pill>}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {!state.loading && !state.error && <Pill tone="neutral">{state.users.length} members</Pill>}
+            <Button size="sm" variant="ghost" leftIcon="⚑" loading={ownerlessBusy} disabled={ownerlessBusy} onClick={claimOwnerless}
+              title="Assign every ownerless project to you (the current admin)">
+              Claim ownerless
+            </Button>
+          </div>
         </div>
 
-        <Card title="Invite user" style={{ marginBottom: 20 }}>
+        <Card title="Invite user">
           <form onSubmit={invite} className="bp-admin-form" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) auto auto', gap: 12, alignItems: 'flex-start' }}>
             <Input label="Work email" type="email" placeholder="name@bimgis.io" fullWidth required
               value={email} onChange={(e) => { setEmail(e.target.value); setInviteErr(''); }} error={inviteErr || undefined} />
@@ -219,15 +401,20 @@ function AdminScreen({ who, nav, onMenu }) {
         ) : (
           <DataTable columns={cols} rows={state.users} rowKey={r => r.id} caption={`${state.users.length} users`} actions={actions} />
         )}
+
+        <AllProjectsCard mobile={mobile} />
       </main>
 
       <Footer brand="BIM·GIS Platform · 2026"
         links={[{ href: '#privacy', label: 'Privacy' }, { href: '#status', label: 'Status' }, { href: '#api', label: 'API' }]}
-        right={<span>v0.2.0</span>} />
+        right={<span>v0.6.0</span>} />
 
       <ToastStack>
         {toasts.map(t => <Toast key={t.id} tone={t.tone} title={t.title} description={t.description} onClose={() => setToasts(ts => ts.filter(x => x.id !== t.id))} />)}
       </ToastStack>
+
+      <CredentialsModal open={credModal.open} kind={credModal.kind} data={credModal.data}
+        onClose={() => setCredModal({ open: false, kind: null, data: null })} />
 
       <style>{`
         @media (max-width: 720px) {

@@ -1399,34 +1399,165 @@ function GeoServerCard({ project, push, refresh }) {
     } finally { setBusy(false); }
   }
 
+  const connected = !state.loading && !state.error;
+  const dotColor = state.loading ? '#9ab' : state.error ? '#f06868' : '#6cd8a8';
+  const dotPulse = state.loading;
+
   return (
-    <Card title="GeoServer"
-      subtitle={`OGC services for the "${state.workspace}" workspace · your propos credentials are also your GeoServer login`}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
-        <Button size="sm" variant="ghost" leftIcon="↗"
-          onClick={() => window.open(`${apiOrigin}/geoserver/web/`, '_blank', 'noopener')}>
-          Open GeoServer admin
-        </Button>
-        <Button size="sm" variant="ghost" leftIcon="⎘" onClick={() => copy(wmsUrl, 'WMS GetCapabilities')}>Copy WMS URL</Button>
-        <Button size="sm" variant="ghost" leftIcon="⎘" onClick={() => copy(wfsUrl, 'WFS GetCapabilities')}>Copy WFS URL</Button>
-        <Button size="sm" variant="ghost" leftIcon="⟳" disabled={busy} onClick={resync}>Re-sync layers</Button>
+    <div style={{
+      borderRadius: 'var(--r-lg)', overflow: 'hidden',
+      border: '1px solid var(--brand-line-strong)',
+      background: 'var(--brand-surface)',
+      boxShadow: 'var(--shadow-card)',
+    }}>
+      {/* ── Branded header band — teal→orange gradient (the brand pair) ── */}
+      <div style={{
+        position: 'relative',
+        padding: '16px 18px',
+        background: 'linear-gradient(135deg, rgba(54,224,212,0.18) 0%, rgba(54,224,212,0.06) 50%, rgba(255,154,82,0.08) 100%)',
+        borderBottom: '1px solid var(--brand-line)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+          {/* Globe / GS mark */}
+          <div style={{
+            width: 42, height: 42, borderRadius: 'var(--r-md)', flexShrink: 0,
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            background: 'linear-gradient(135deg, #36e0d4 0%, #1f9fa0 100%)',
+            color: '#06121a', fontFamily: 'var(--font-head)', fontSize: 18, fontWeight: 700,
+            boxShadow: '0 4px 12px rgba(54,224,212,0.25)',
+          }}>GS</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontSize: 'var(--fs-h3)', fontWeight: 600 }}>GeoServer</h3>
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '2px 9px', borderRadius: 'var(--r-pill)', fontSize: 10,
+                fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.08em',
+                background: connected ? 'rgba(108,216,168,0.15)' : state.error ? 'rgba(240,104,104,0.15)' : 'rgba(255,255,255,0.06)',
+                color: connected ? '#bff5d8' : state.error ? '#ffc4c4' : 'var(--brand-muted)',
+                border: `1px solid ${connected ? 'rgba(108,216,168,0.4)' : state.error ? 'rgba(240,104,104,0.4)' : 'var(--brand-line)'}`,
+              }}>
+                <span style={{
+                  display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+                  background: dotColor,
+                  animation: dotPulse ? 'gs-pulse 1.4s ease-in-out infinite' : undefined,
+                }} />
+                {state.loading ? 'checking' : state.error ? 'offline' : 'connected'}
+              </span>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--brand-muted)', marginTop: 4 }}>
+              OGC services · workspace <code style={{ fontFamily: 'var(--font-mono)', background: 'rgba(255,255,255,0.06)', padding: '1px 6px', borderRadius: 3, color: 'var(--brand-text)' }}>{state.workspace}</code> · your propos login also works as GeoServer login
+            </div>
+          </div>
+          {/* Stat block */}
+          <div style={{
+            display: 'flex', gap: 14, flexShrink: 0,
+            paddingLeft: 14, borderLeft: '1px solid var(--brand-line)',
+          }}>
+            <div style={{ textAlign: 'right' }}>
+              <div className="micro" style={{ fontSize: 9 }}>LAYERS</div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 600, color: 'var(--brand-text)' }}>
+                {state.loading ? '…' : state.layers.length}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <form onSubmit={importFromGs} style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', paddingTop: 12, borderTop: '1px solid var(--brand-line)' }}>
-        <div style={{ flex: 2, minWidth: 220 }}>
-          <label className="micro" style={{ display: 'block', marginBottom: 4 }}>Reference a GeoServer layer</label>
-          <select value={picked} onChange={(e) => setPicked(e.target.value)} disabled={busy || state.loading}
-            style={{ width: '100%', padding: '8px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>
-            <option value="">{state.loading ? 'loading…' : state.layers.length === 0 ? 'no layers in workspace yet' : '— choose layer —'}</option>
-            {state.layers.map(l => <option key={l.name} value={l.name}>{l.name}</option>)}
-          </select>
+
+      {/* ── Action grid — coloured tiles per intent ── */}
+      <div style={{
+        padding: 16,
+        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 10,
+        borderBottom: '1px solid var(--brand-line)',
+      }}>
+        {[
+          { label: 'Open GeoServer admin', sub: 'browse / publish layers, edit styles', icon: '↗',
+            tone: { bg: 'rgba(54,224,212,0.10)', border: 'rgba(54,224,212,0.35)', icon: '#36e0d4', hover: 'rgba(54,224,212,0.16)' },
+            onClick: () => window.open(`${apiOrigin}/geoserver/web/`, '_blank', 'noopener') },
+          { label: 'Copy WMS URL', sub: 'GetCapabilities · QGIS / ArcGIS', icon: '⎘',
+            tone: { bg: 'rgba(106,155,232,0.10)', border: 'rgba(106,155,232,0.35)', icon: '#6a9be8', hover: 'rgba(106,155,232,0.16)' },
+            onClick: () => copy(wmsUrl, 'WMS GetCapabilities') },
+          { label: 'Copy WFS URL', sub: 'GetCapabilities · vector features', icon: '⎘',
+            tone: { bg: 'rgba(106,155,232,0.10)', border: 'rgba(106,155,232,0.35)', icon: '#6a9be8', hover: 'rgba(106,155,232,0.16)' },
+            onClick: () => copy(wfsUrl, 'WFS GetCapabilities') },
+        ].map(t => (
+          <button key={t.label} type="button" onClick={t.onClick}
+            onMouseEnter={(e) => { e.currentTarget.style.background = t.tone.hover; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = t.tone.bg; }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+              background: t.tone.bg, border: `1px solid ${t.tone.border}`,
+              borderRadius: 'var(--r-md)', cursor: 'pointer', textAlign: 'left',
+              transition: 'background 120ms, border-color 120ms',
+              color: 'var(--brand-text)', fontFamily: 'inherit',
+            }}>
+            <span style={{
+              flexShrink: 0, width: 32, height: 32, borderRadius: 'var(--r-sm)',
+              background: 'rgba(0,0,0,0.25)', color: t.tone.icon,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 16,
+            }}>{t.icon}</span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>{t.label}</span>
+              <span style={{ display: 'block', fontSize: 10, color: 'var(--brand-muted)', marginTop: 2, fontFamily: 'var(--font-mono)' }}>{t.sub}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {/* ── Import from GeoServer (reference, not copy) ── */}
+      <div style={{ padding: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <span style={{ display: 'inline-block', width: 4, height: 14, background: 'var(--brand-bim)', borderRadius: 2 }} />
+          <h4 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: 'var(--brand-text)' }}>Reference a GeoServer layer</h4>
+          <span className="micro" style={{ marginLeft: 'auto' }}>links by reference · GS stays source of truth</span>
         </div>
-        <div style={{ flex: 1, minWidth: 160 }}>
-          <Input label="Local name (optional)" placeholder="defaults to the GS layer name" value={name} onChange={(e) => setName(e.target.value)} fullWidth />
-        </div>
-        <Button type="submit" variant="primary" loading={busy} disabled={!picked || busy}>Add reference</Button>
-      </form>
-      {state.error && <div style={{ marginTop: 10, color: 'var(--brand-error, #f88)', fontSize: 12 }}>{state.error}</div>}
-    </Card>
+        <form onSubmit={importFromGs} style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div style={{ flex: 2, minWidth: 220 }}>
+            <select value={picked} onChange={(e) => setPicked(e.target.value)} disabled={busy || state.loading}
+              style={{ width: '100%', padding: '8px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)', fontSize: 13 }}>
+              <option value="">{state.loading ? 'loading layers…' : state.layers.length === 0 ? 'no layers in workspace yet' : `— choose from ${state.layers.length} layer${state.layers.length === 1 ? '' : 's'} —`}</option>
+              {state.layers.map(l => <option key={l.name} value={l.name}>{l.name}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 1, minWidth: 160 }}>
+            <Input placeholder="local name (optional)" value={name} onChange={(e) => setName(e.target.value)} fullWidth />
+          </div>
+          <Button type="submit" variant="primary" leftIcon="+" loading={busy} disabled={!picked || busy}>Add reference</Button>
+        </form>
+        {state.error && (
+          <div style={{ marginTop: 10, padding: '8px 10px', background: 'rgba(240,104,104,0.10)', border: '1px solid rgba(240,104,104,0.35)', borderRadius: 'var(--r-md)', color: '#ffc4c4', fontSize: 12 }}>
+            <strong>Couldn't reach GeoServer:</strong> {state.error}
+          </div>
+        )}
+      </div>
+
+      {/* ── Danger zone — re-sync overwrites GS state ── */}
+      <div style={{
+        padding: '10px 16px',
+        background: 'rgba(255,154,82,0.06)',
+        borderTop: '1px solid rgba(255,154,82,0.25)',
+        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+      }}>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: 'var(--brand-muted)' }}>
+          ⚠ Re-publishes every layer of this project to GeoServer. Useful after editing features directly in QGIS / psql.
+        </span>
+        <button type="button" onClick={resync} disabled={busy}
+          style={{
+            padding: '6px 12px', borderRadius: 'var(--r-md)', cursor: busy ? 'progress' : 'pointer',
+            background: 'rgba(255,154,82,0.18)', border: '1px solid rgba(255,154,82,0.5)',
+            color: '#ffd1a8', fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '.06em', textTransform: 'uppercase',
+          }}>
+          ⟳ Re-sync layers
+        </button>
+      </div>
+
+      <style>{`
+        @keyframes gs-pulse {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50%      { opacity: 0.4; transform: scale(1.3); }
+        }
+      `}</style>
+    </div>
   );
 }
 
