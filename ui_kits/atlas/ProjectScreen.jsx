@@ -41,6 +41,29 @@ const _toneFor = (status) => {
   return 'neutral';
 };
 
+function _fmtDist(m) {
+  if (m == null) return '—';
+  if (m < 1000) return Math.round(m) + ' m';
+  return (m / 1000).toFixed(2) + ' km';
+}
+function _fmtDur(s) {
+  if (s == null || !isFinite(s) || s < 0) return '—';
+  if (s < 60) return Math.round(s) + 's';
+  const m = Math.floor(s / 60), sec = Math.round(s % 60);
+  if (m < 60) return `${m}m ${sec}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+function _fmtArrival(s) {
+  // arrival_s = seconds from depot-leave (legacy convention)
+  if (s == null) return '—';
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`;
+}
+function _teamColor(i) { return `hsl(${(i * 137.5) % 360}, 60%, 60%)`; }
+const _PRIO_DOT = { urgent: '#e8a060', high: '#fec060', normal: '#6a9be8', low: '#7a8aa8' };
+
 // ─── Tab panels ───────────────────────────────────────────────────────────
 
 function OverviewPanel({ project, models, modelsLoading, overlays, overlaysLoading }) {
@@ -741,6 +764,89 @@ function OrdersPanel({ project, push, onOpenMap }) {
 }
 
 // ─── Optimize tab — MDVRP-TW solver UI via SSE ────────────────────────────
+// ─── Per-team route card (used by both live runs and loaded history) ─────
+function _OptimalityBadge({ result }) {
+  if (!result || !result.solver) return null;
+  if (result.solver === 'ortools') {
+    return result.proven_optimal
+      ? <Pill tone="ok"   title="OR-Tools search completed before the time limit — could not find a better solution within the encoded model.">✓ OPTIMAL · proven</Pill>
+      : <Pill tone="warn" title="OR-Tools returned the best solution within the time limit. A longer time limit might (or might not) improve it.">⏱ time limit · not proven optimal</Pill>;
+  }
+  if (result.solver === 'ga') {
+    return result.converged_early
+      ? <Pill tone="info" title="GA fitness stopped improving before the maximum generation count — likely a good local optimum.">~ converged · likely good</Pill>
+      : <Pill tone="warn" title="GA ran the full generation budget without converging — increasing 'generations' might find a better solution.">⚠ budget hit · could improve</Pill>;
+  }
+  return null;
+}
+
+function _TeamRouteCard({ route, idx }) {
+  const accent = _teamColor(idx);
+  const cap = (route.capacity != null) ? Math.round(route.capacity * 10) / 10 : null;
+  const used = (route.stops || []).length;
+  const over = (route.over_capacity_by != null) ? route.over_capacity_by : (cap != null ? Math.max(0, used - cap) : 0);
+  return (
+    <details open style={{
+      border: '1px solid var(--brand-line)', borderLeft: `3px solid ${accent}`,
+      borderRadius: 'var(--r-md)', background: 'var(--brand-bg-2)', marginBottom: 8,
+    }}>
+      <summary style={{
+        listStyle: 'none', cursor: 'pointer', padding: '10px 14px',
+        display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', userSelect: 'none',
+      }}>
+        <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: accent, flexShrink: 0 }} />
+        <span style={{ flex: 1, minWidth: 140, fontWeight: 600, color: 'var(--brand-text)' }}>{route.team_name || `Team ${route.team_id || idx + 1}`}</span>
+        <span style={{ fontSize: 11, color: over > 0 ? 'var(--brand-warn, #e8a060)' : 'var(--brand-muted)' }}>
+          {cap != null ? `${used} / ${cap}${over > 0 ? ` ⚠ +${over}` : ''}` : `${used} stops`}
+        </span>
+        <span style={{ fontSize: 11, color: 'var(--brand-muted)', fontFamily: 'var(--font-mono)' }}>{_fmtDist(route.distance_m)}</span>
+        <span style={{ fontSize: 11, color: 'var(--brand-muted)', fontFamily: 'var(--font-mono)' }}>{_fmtDur(route.time_s)}</span>
+      </summary>
+      <div style={{ padding: '0 14px 12px', overflowX: 'auto' }}>
+        {used === 0 ? (
+          <div className="micro" style={{ padding: '8px 0' }}>NO STOPS ASSIGNED</div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 4, fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--brand-line)' }}>
+                {['#', 'WO', 'Title', 'Priority', 'Arrival', 'From prev'].map(h => (
+                  <th key={h} style={{ textAlign: 'left', padding: '6px 8px', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--brand-faint)', letterSpacing: '.06em', textTransform: 'uppercase', fontWeight: 600 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(route.stops || []).map((s, i) => {
+                const pri = s.priority || '—';
+                const woNum = s.work_order_number || (s.work_order_id ? s.work_order_id.slice(0, 8) : '—');
+                return (
+                  <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <td style={{ padding: '6px 8px', color: 'var(--brand-faint)', width: 28, textAlign: 'right' }}>{i + 1}</td>
+                    <td style={{ padding: '6px 8px', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{woNum}</td>
+                    <td style={{ padding: '6px 8px' }}>
+                      <strong>{s.name || s.work_order_id || '—'}</strong>
+                      {s.safety_requirements && s.safety_requirements !== 'none' && (
+                        <span style={{ marginLeft: 6, fontSize: 10, color: 'var(--brand-warn, #fec)' }}>⚠ {s.safety_requirements}</span>
+                      )}
+                      {s.model_id && <div className="micro" style={{ marginTop: 2 }}>{s.model_id}</div>}
+                    </td>
+                    <td style={{ padding: '6px 8px' }}>
+                      <span style={{ color: _PRIO_DOT[pri] || 'var(--brand-faint)', marginRight: 4 }}>●</span>
+                      <span style={{ fontSize: 11 }}>{pri}</span>
+                    </td>
+                    <td style={{ padding: '6px 8px', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--brand-muted)' }}>{_fmtArrival(s.arrival_s)}</td>
+                    <td style={{ padding: '6px 8px', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--brand-muted)' }}>{s.from_prev_m != null ? _fmtDist(s.from_prev_m) : '—'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </details>
+  );
+}
+
+// ─── Optimize tab — MDVRP-TW solver UI via SSE ────────────────────────────
 function OptimizePanel({ project, push }) {
   const [solver, setSolver] = React.useState('ga');
   const [shared, setShared] = React.useState({ cruise_kmh: 30, service_minutes: 15, wo_per_member: 5 });
@@ -748,12 +854,13 @@ function OptimizePanel({ project, push }) {
   const [ot, setOt]         = React.useState({ ot_time_limit_s: 30, ot_first_solution: 'PATH_CHEAPEST_ARC', ot_metaheuristic: 'GUIDED_LOCAL_SEARCH' });
   const [roadLayerId, setRoadLayerId] = React.useState('');
   const [routingLayers, setRoutingLayers] = React.useState([]);
-  const [running, setRunning]   = React.useState(false);
-  const [progress, setProgress] = React.useState(0);
-  const [status, setStatus]     = React.useState('');
-  const [log, setLog]           = React.useState([]);
-  const [summary, setSummary]   = React.useState(null);
-  const [history, setHistory]   = React.useState([]);
+  const [running, setRunning]       = React.useState(false);
+  const [progress, setProgress]     = React.useState(0);
+  const [status, setStatus]         = React.useState('');
+  const [log, setLog]               = React.useState([]);
+  const [result, setResult]         = React.useState(null);   // full done-message OR loaded run
+  const [history, setHistory]       = React.useState([]);
+  const [loadingRun, setLoadingRun] = React.useState(null);
   const esRef = React.useRef(null);
 
   React.useEffect(() => () => { if (esRef.current) esRef.current.close(); }, []);
@@ -768,7 +875,7 @@ function OptimizePanel({ project, push }) {
   const loadLayers = React.useCallback(async () => {
     try {
       const data = await _api(`/projects/${project.id}/gis-layers`);
-      const rl = (data.layers || []).filter(l => l.is_routing || l.routing || (l.layer_type || '').includes('routing'));
+      const rl = (data.layers || []).filter(l => l.is_routing || l.routing || (l.layer_type || '').toLowerCase().includes('routing'));
       setRoutingLayers(rl);
     } catch { setRoutingLayers([]); }
   }, [project.id]);
@@ -779,11 +886,25 @@ function OptimizePanel({ project, push }) {
     setLog(L => [...L.slice(-200), `[${new Date().toLocaleTimeString()}] ${line}`]);
   }
 
+  async function loadRun(id) {
+    setLoadingRun(id);
+    try {
+      const run = await _api(`/projects/${project.id}/optimize/runs/${id}`);
+      setResult(run);
+      setProgress(100);
+      setStatus(`loaded run ${id.slice(0, 8)}`);
+    } catch (err) {
+      push({ tone: 'error', title: 'Could not load run', description: err.message });
+    } finally { setLoadingRun(null); }
+  }
+
   async function deleteRun(id) {
     if (!window.confirm('Delete this run from history?')) return;
     try {
       await _api(`/projects/${project.id}/optimize/runs/${id}`, { method: 'DELETE' });
       push({ tone: 'success', title: 'Run deleted' });
+      // If the displayed result IS this run, clear it.
+      if (result && (result.id === id || result.run_id === id)) setResult(null);
       loadHistory();
     } catch (err) {
       push({ tone: 'error', title: 'Delete failed', description: err.message });
@@ -792,7 +913,7 @@ function OptimizePanel({ project, push }) {
 
   function run() {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
-    setRunning(true); setProgress(0); setStatus('starting…'); setLog([]); setSummary(null);
+    setRunning(true); setProgress(0); setStatus('starting…'); setLog([]); setResult(null);
 
     const params = new URLSearchParams({
       solver,
@@ -834,14 +955,22 @@ function OptimizePanel({ project, push }) {
         if (typeof m.generation === 'number' && typeof m.total_generations === 'number') {
           const pct = Math.round(100 * m.generation / m.total_generations);
           setProgress(pct);
-          setStatus(`gen ${m.generation}/${m.total_generations}  ·  best ${m.best_distance != null ? Math.round(m.best_distance).toLocaleString() : '?'} m`);
+          setStatus(`gen ${m.generation}/${m.total_generations}  ·  best fitness ${m.best_fitness != null ? m.best_fitness.toFixed(2) : '?'}`);
         } else if (m.message) {
           appendLog(m.message);
         }
       } else if (m.type === 'done') {
         setProgress(100);
-        setStatus(`done — ${m.summary && m.summary.routes_count != null ? `${m.summary.routes_count} route(s)` : 'finished'}`);
-        setSummary(m.summary || m.result || m);
+        // Server may emit an error-shaped "done" with status=no-work-orders/no-teams
+        if (m.status === 'no-work-orders' || m.status === 'no-teams') {
+          setStatus(m.message || m.status);
+          push({ tone: 'warn', title: 'Optimize finished with no result', description: m.message });
+        } else {
+          const totalDist = (m.routes || []).reduce((s, r) => s + (r.distance_m || 0), 0);
+          setStatus(`done in ${_fmtDur(m.elapsed_s)}  ·  ${(m.routes || []).length} routes  ·  total ${_fmtDist(totalDist)}`);
+          (m.log_lines || []).forEach(appendLog);
+        }
+        setResult(m);
         appendLog(`done · run_id=${m.run_id || '?'}`);
         setRunning(false);
         es.close(); esRef.current = null;
@@ -868,9 +997,19 @@ function OptimizePanel({ project, push }) {
     setRunning(false); setStatus('stopped by user');
   }
 
+  function clear() { setResult(null); setProgress(0); setStatus(''); setLog([]); }
+
   function input(label, val, onChange, opts) {
     return <Input label={label} type="number" value={val} onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))} {...(opts || {})} />;
   }
+
+  const routes = (result && result.routes) || [];
+  const totalDist = routes.reduce((s, r) => s + (r.distance_m || 0), 0);
+  const totalTime = routes.reduce((s, r) => s + (r.time_s    || 0), 0);
+  const solverLabel = result && result.solver === 'ortools'
+    ? `OR-Tools (${result.solver_status || '?'})`
+    : result && result.solver === 'ga' ? 'Genetic Algorithm' : '';
+  const runId = result && (result.run_id || result.id);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -943,8 +1082,9 @@ function OptimizePanel({ project, push }) {
         </div>
       </Card>
 
-      {(running || progress > 0 || summary) && (
-        <Card title="Progress" subtitle={status}>
+      {(running || progress > 0 || result) && (
+        <Card title="Progress" subtitle={status}
+          action={result && !running ? <Button size="sm" variant="ghost" onClick={clear}>Clear</Button> : null}>
           <div style={{ height: 8, background: 'rgba(255,255,255,0.06)', borderRadius: 4, overflow: 'hidden', marginBottom: 12 }}>
             <div style={{ height: '100%', width: `${progress}%`, background: 'linear-gradient(90deg, var(--brand-bim), var(--brand-gis))', transition: 'width 200ms' }} />
           </div>
@@ -955,21 +1095,53 @@ function OptimizePanel({ project, push }) {
               maxHeight: 200, overflow: 'auto', whiteSpace: 'pre-wrap',
             }}>{log.join('\n')}</pre>
           )}
-          {summary && (
-            <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
-              {[
-                ['Total distance', summary.total_distance_m != null ? `${Math.round(summary.total_distance_m / 1000)} km` : '—'],
-                ['Routes',         summary.routes_count != null ? summary.routes_count : (summary.routes ? summary.routes.length : '—')],
-                ['Unserved',       summary.unserved_count != null ? summary.unserved_count : '—'],
-                ['Run ID',         summary.run_id || summary.id || '—'],
-              ].map(([k, v]) => (
-                <div key={k} style={{ padding: 10, background: 'var(--brand-bg-2)', border: '1px solid var(--brand-line)', borderRadius: 'var(--r-md)' }}>
-                  <div className="micro">{k}</div>
-                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 14, color: 'var(--brand-text)', marginTop: 4 }}>{String(v)}</div>
-                </div>
-              ))}
-            </div>
-          )}
+        </Card>
+      )}
+
+      {/* ── Rich result rendering: summary card + optimality badge + per-team routes ── */}
+      {result && routes.length > 0 && (
+        <Card title="Result"
+          subtitle={
+            result.work_order_count != null && result.team_count != null
+              ? `${result.work_order_count} WOs across ${result.team_count} teams`
+              : `${routes.length} route${routes.length === 1 ? '' : 's'}`
+          }
+          action={runId && (
+            <a href={`/projects/${project.id}/optimize/runs/${runId}/export.zip${(window.PlatformAuth && window.PlatformAuth.getToken && window.PlatformAuth.getToken()) ? '?token=' + encodeURIComponent(window.PlatformAuth.getToken()) : ''}`}
+               style={{ fontSize: 12, color: 'var(--brand-bim)', textDecoration: 'none', alignSelf: 'center' }}>Export .zip</a>
+          )}>
+          {/* ── Stat tiles ── */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 14 }}>
+            <KpiTile label="Total distance" value={_fmtDist(totalDist)} />
+            <KpiTile label="Total time"     value={_fmtDur(totalTime)} />
+            <KpiTile label="Routes"         value={routes.length} />
+            <KpiTile label="Fitness"        value={result.fitness != null ? Math.round(result.fitness) : '—'} tone="ok" />
+          </div>
+
+          {/* ── Optimality + provider line ── */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--brand-muted)', marginBottom: 14 }}>
+            {solverLabel && <span className="micro">{solverLabel}</span>}
+            <_OptimalityBadge result={result} />
+            {result.distance_provider && <span className="micro">distance: {result.distance_provider}</span>}
+            {result.unreachable_pairs > 0 && (
+              <span style={{ color: 'var(--brand-warn, #e8a060)', fontSize: 11 }}>
+                ⚠ {result.unreachable_pairs} unreachable pair(s) fell back to Haversine
+              </span>
+            )}
+            {runId && <span className="micro" style={{ marginLeft: 'auto' }}>run_id: {runId.toString().slice(0, 8)}</span>}
+          </div>
+
+          {/* ── Per-team route cards ── */}
+          {routes.map((r, i) => <_TeamRouteCard key={r.team_id || i} route={r} idx={i} />)}
+        </Card>
+      )}
+
+      {result && routes.length === 0 && (
+        <Card title="Result">
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--brand-muted)' }}>
+            <div className="micro">{result.status === 'no-work-orders' ? 'NO OPEN WORK ORDERS' : result.status === 'no-teams' ? 'NO ACTIVE TEAMS' : 'NO ROUTES'}</div>
+            <div style={{ fontSize: 'var(--fs-small)', marginTop: 8 }}>{result.message || 'The solver returned no routes — check that you have at least one active team and one open WO.'}</div>
+          </div>
         </Card>
       )}
 
@@ -985,12 +1157,13 @@ function OptimizePanel({ project, push }) {
                   <span className="micro" style={{ marginLeft: 8 }}>
                     {h.created_at ? _fmtDate(h.created_at) : ''}
                     {h.solver ? ` · ${h.solver}` : ''}
-                    {h.total_distance_m != null ? ` · ${Math.round(h.total_distance_m / 1000)} km` : ''}
-                    {h.routes_count != null ? ` · ${h.routes_count} route${h.routes_count === 1 ? '' : 's'}` : ''}
+                    {(h.summary && h.summary.total_distance_m != null) ? ` · ${_fmtDist(h.summary.total_distance_m)}` : (h.total_distance_m != null ? ` · ${_fmtDist(h.total_distance_m)}` : '')}
+                    {(h.summary && h.summary.routes_count != null) ? ` · ${h.summary.routes_count} route${h.summary.routes_count === 1 ? '' : 's'}` : (h.routes_count != null ? ` · ${h.routes_count} route${h.routes_count === 1 ? '' : 's'}` : '')}
                   </span>
                 </span>
+                <Button size="sm" variant="secondary" loading={loadingRun === h.id} disabled={loadingRun === h.id} onClick={() => loadRun(h.id)}>Load</Button>
                 <a href={`/projects/${project.id}/optimize/runs/${h.id}/export.zip${(window.PlatformAuth && window.PlatformAuth.getToken && window.PlatformAuth.getToken()) ? '?token=' + encodeURIComponent(window.PlatformAuth.getToken()) : ''}`}
-                   style={{ fontSize: 12, color: 'var(--brand-bim)', textDecoration: 'none' }}>Export .zip</a>
+                   style={{ fontSize: 12, color: 'var(--brand-bim)', textDecoration: 'none' }}>Export</a>
                 <Button size="sm" variant="ghost" onClick={() => deleteRun(h.id)}>Delete</Button>
               </li>
             ))}
@@ -1001,14 +1174,21 @@ function OptimizePanel({ project, push }) {
   );
 }
 
-// ─── GIS overlays tab ─────────────────────────────────────────────────────
+// ─── GIS overlays tab — list + toggle + add (file + URL) + routing + download + delete ──
 function OverlaysPanel({ project, overlays, loading, push, refresh }) {
-  const [pendingId, setPendingId] = React.useState(null);
-  const [showAdd, setShowAdd] = React.useState(false);
-  const [url, setUrl] = React.useState('');
-  const [name, setName] = React.useState('');
-  const [busy, setBusy] = React.useState(false);
-  const [addErr, setAddErr] = React.useState(null);
+  const [pendingId, setPendingId]   = React.useState(null);  // for toggle / mark / download / delete
+  const [addMode, setAddMode]       = React.useState(null);  // null | 'url' | 'file'
+  const [url, setUrl]               = React.useState('');
+  const [name, setName]             = React.useState('');
+  const [file, setFile]             = React.useState(null);
+  const [busy, setBusy]             = React.useState(false);
+  const [pct, setPct]               = React.useState(0);
+  const [addErr, setAddErr]         = React.useState(null);
+  const fileRef = React.useRef(null);
+
+  function isRouting(layer) {
+    return !!(layer && (layer.is_routing || layer.routing || (layer.layer_type || '').toLowerCase().includes('routing')));
+  }
 
   async function toggle(layer) {
     setPendingId(layer.id);
@@ -1024,6 +1204,62 @@ function OverlaysPanel({ project, overlays, loading, push, refresh }) {
     } finally { setPendingId(null); }
   }
 
+  async function markRouting(layer) {
+    if (!window.confirm(`Mark "${layer.name}" as a road network?\n\nThis builds pgRouting topology on its LineString features so the optimiser can route on them.`)) return;
+    setPendingId(layer.id);
+    try {
+      const d = await _api(`/projects/${project.id}/gis-layers/${layer.id}/mark-as-routing`, { method: 'POST' });
+      push({ tone: 'success', title: 'Marked as routing layer',
+        description: d && d.edges != null ? `${d.edges.toLocaleString()} edges, ${(d.vertices || 0).toLocaleString()} vertices` : undefined });
+      refresh();
+    } catch (err) {
+      push({ tone: 'error', title: 'Mark-as-routing failed', description: err.message });
+    } finally { setPendingId(null); }
+  }
+
+  async function unmarkRouting(layer) {
+    if (!window.confirm(`Unmark "${layer.name}" as a routing layer?`)) return;
+    setPendingId(layer.id);
+    try {
+      await _api(`/projects/${project.id}/gis-layers/${layer.id}/unmark-routing`, { method: 'POST' });
+      push({ tone: 'success', title: 'Unmarked routing layer' });
+      refresh();
+    } catch (err) {
+      push({ tone: 'error', title: 'Unmark failed', description: err.message });
+    } finally { setPendingId(null); }
+  }
+
+  async function download(layer) {
+    setPendingId(layer.id);
+    try {
+      const r = await fetch(`/projects/${project.id}/gis-layers/${layer.id}/export`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const url2 = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url2;
+      a.download = `${(layer.name || 'layer').replace(/[^a-zA-Z0-9._-]+/g, '-')}.geojson`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url2), 1000);
+    } catch (err) {
+      push({ tone: 'error', title: 'Download failed', description: err.message });
+    } finally { setPendingId(null); }
+  }
+
+  async function del(layer) {
+    if (!window.confirm(`Delete layer "${layer.name}"?\n\nThis removes the layer from the project. The original data file (if any) is left on disk.`)) return;
+    setPendingId(layer.id);
+    try {
+      await _api(`/projects/${project.id}/gis-layers/${layer.id}`, { method: 'DELETE' });
+      push({ tone: 'success', title: `Deleted ${layer.name}` });
+      refresh();
+    } catch (err) {
+      push({ tone: 'error', title: 'Delete failed', description: err.message });
+    } finally { setPendingId(null); }
+  }
+
+  function resetAdd() { setUrl(''); setName(''); setFile(null); setAddErr(null); setPct(0); setAddMode(null); }
+
   async function addFromUrl(e) {
     e.preventDefault();
     if (!url.trim()) return;
@@ -1035,8 +1271,9 @@ function OverlaysPanel({ project, overlays, loading, push, refresh }) {
         method: 'POST', body: JSON.stringify(body),
       });
       const layer = data && (data.layer || data);
-      push({ tone: 'success', title: 'Overlay added', description: (layer && layer.name) || (layer && layer.id) });
-      setUrl(''); setName(''); setShowAdd(false);
+      push({ tone: 'success', title: 'Overlay added',
+        description: (layer && layer.name) ? `${layer.name}${data.features_added != null ? ` · ${data.features_added} features` : ''}` : undefined });
+      resetAdd();
       refresh();
     } catch (err) {
       setAddErr(err.message);
@@ -1044,17 +1281,59 @@ function OverlaysPanel({ project, overlays, loading, push, refresh }) {
     } finally { setBusy(false); }
   }
 
+  async function addFromFile(e) {
+    e.preventDefault();
+    if (!file) { setAddErr('Pick a file first'); return; }
+    setBusy(true); setAddErr(null); setPct(0);
+    try {
+      const data = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `/projects/${project.id}/gis-layers`);
+        const auth = window.PlatformAuth && window.PlatformAuth.getToken && window.PlatformAuth.getToken();
+        if (auth) xhr.setRequestHeader('Authorization', 'Bearer ' + auth);
+        xhr.upload.onprogress = (e2) => { if (e2.lengthComputable) setPct(Math.round(100 * e2.loaded / e2.total)); };
+        xhr.onload  = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText)); } catch { resolve({}); }
+          } else { reject(new Error(`${xhr.status} ${xhr.responseText || xhr.statusText}`)); }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        const fd = new FormData();
+        fd.append('file', file);
+        if (name.trim()) fd.append('name', name.trim());
+        xhr.send(fd);
+      });
+      const layer = data && data.layer;
+      push({ tone: 'success', title: 'Overlay added',
+        description: layer ? `${layer.name}${data.features_added != null ? ` · ${data.features_added} features` : ''}` : file.name });
+      resetAdd();
+      refresh();
+    } catch (err) {
+      setAddErr(err.message);
+      push({ tone: 'error', title: 'Upload failed', description: err.message });
+    } finally { setBusy(false); setPct(0); }
+  }
+
   if (loading) {
     return <div style={{ padding: '60px 0', textAlign: 'center', color: 'var(--brand-muted)' }}><Spinner /><div className="micro" style={{ marginTop: 14 }}>LOADING OVERLAYS</div></div>;
   }
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {showAdd ? (
-        <Card title="Add overlay from URL"
-          subtitle="WMS, WFS, GeoJSON, KML, TopoJSON, MVT — backend infers the source type"
-          action={<button type="button" onClick={() => { setShowAdd(false); setAddErr(null); }} aria-label="Close"
-            style={{ background: 'transparent', border: '1px solid var(--brand-line-strong)', color: 'var(--brand-muted)', borderRadius: 'var(--r-md)', width: 28, height: 28, fontSize: 18, cursor: 'pointer' }}>×</button>}>
+  // ── Add modal (URL or File) ──
+  if (addMode) {
+    return (
+      <Card title={addMode === 'url' ? 'Add overlay from URL' : 'Upload overlay file'}
+        subtitle={addMode === 'url'
+          ? 'WMS, WFS, GeoJSON, KML, TopoJSON, MVT — backend infers the source type'
+          : 'GeoJSON, KML, Shapefile (.zip), GeoPackage (.gpkg) — backend infers from the file extension'}
+        action={
+          <div style={{ display: 'flex', gap: 6 }}>
+            <Button size="sm" variant={addMode === 'url'  ? 'primary' : 'ghost'} onClick={() => { setAddMode('url');  setAddErr(null); }}>URL</Button>
+            <Button size="sm" variant={addMode === 'file' ? 'primary' : 'ghost'} onClick={() => { setAddMode('file'); setAddErr(null); }}>File</Button>
+            <button type="button" onClick={resetAdd} aria-label="Close"
+              style={{ background: 'transparent', border: '1px solid var(--brand-line-strong)', color: 'var(--brand-muted)', borderRadius: 'var(--r-md)', width: 28, height: 28, fontSize: 18, cursor: 'pointer' }}>×</button>
+          </div>
+        }>
+        {addMode === 'url' ? (
           <form onSubmit={addFromUrl} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <Input label="URL" placeholder="https://example.org/data.geojson  or  https://wfs.example.org/?service=WFS&…"
               fullWidth required type="url"
@@ -1063,42 +1342,100 @@ function OverlaysPanel({ project, overlays, loading, push, refresh }) {
             <Input label="Layer name (optional)" placeholder="auto-derived from the URL if blank"
               fullWidth value={name} onChange={(e) => setName(e.target.value)} />
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <Button type="button" variant="ghost" disabled={busy} onClick={() => { setShowAdd(false); setAddErr(null); }}>Cancel</Button>
+              <Button type="button" variant="ghost" disabled={busy} onClick={resetAdd}>Cancel</Button>
               <Button type="submit" variant="primary" loading={busy} disabled={!url.trim() || busy}>
                 {busy ? 'Fetching…' : 'Fetch + add'}
               </Button>
             </div>
           </form>
-        </Card>
-      ) : (
-        <Card title="GIS overlays"
-          subtitle={`${overlays.length} layer${overlays.length === 1 ? '' : 's'} on this project`}
-          action={<Button size="sm" variant="primary" leftIcon="+" onClick={() => setShowAdd(true)}>Add overlay</Button>}
-          dense>
-          {overlays.length === 0 ? (
-            <div style={{ padding: 28, textAlign: 'center', color: 'var(--brand-muted)' }}>
-              <div className="micro" style={{ marginBottom: 8 }}>NO OVERLAYS YET</div>
-              <div style={{ fontSize: 'var(--fs-small)' }}>Add a WFS/WMS endpoint or GeoJSON URL to overlay it on the project map.</div>
+        ) : (
+          <form onSubmit={addFromFile} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div onClick={() => !busy && fileRef.current && fileRef.current.click()}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) { setFile(f); setAddErr(null); } }}
+              style={{
+                padding: 24, textAlign: 'center', cursor: busy ? 'progress' : 'pointer',
+                border: '1px dashed var(--brand-line-strong)', borderRadius: 'var(--r-md)',
+                color: 'var(--brand-muted)', fontFamily: 'var(--font-mono)', fontSize: 12,
+              }}>
+              <div style={{ marginBottom: 6, fontSize: 22 }}>↥</div>
+              <div>{busy
+                ? `Uploading… ${pct}%`
+                : file ? `Selected: ${file.name} (${Math.round((file.size || 0) / 1024).toLocaleString()} KB)`
+                  : 'Drop a GeoJSON / KML / Shapefile (.zip) / GeoPackage here or click to browse'}</div>
+              {busy && (
+                <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, marginTop: 10, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${pct}%`, background: 'var(--brand-bim)', transition: 'width 120ms' }} />
+                </div>
+              )}
+              <input ref={fileRef} type="file" hidden
+                accept=".geojson,.json,.kml,.kmz,.zip,.gpkg,.topojson"
+                onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) { setFile(f); setAddErr(null); } e.target.value = ''; }} />
             </div>
-          ) : (
-            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-              {overlays.map((l, i) => (
-                <li key={l.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '14px 16px', borderTop: i === 0 ? 'none' : '1px solid var(--brand-line)' }}>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: 'var(--r-sm)', background: 'var(--brand-gis)' }} />
-                    <span>
-                      <span style={{ fontSize: 'var(--fs-body)' }}>{l.name}</span>
-                      <span className="micro" style={{ display: 'block', marginTop: 2 }}>{l.layer_type || l.source || '—'} · {l.feature_count != null ? `${l.feature_count} features` : '—'}</span>
+            <Input label="Layer name (optional)" placeholder="auto-derived from the filename if blank"
+              fullWidth value={name} onChange={(e) => setName(e.target.value)} />
+            {addErr && <div style={{ color: 'var(--brand-error, #f88)', fontSize: 12 }}>{addErr}</div>}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <Button type="button" variant="ghost" disabled={busy} onClick={resetAdd}>Cancel</Button>
+              <Button type="submit" variant="primary" loading={busy} disabled={!file || busy}>
+                {busy ? `Uploading… ${pct}%` : 'Upload + add'}
+              </Button>
+            </div>
+          </form>
+        )}
+      </Card>
+    );
+  }
+
+  return (
+    <Card title="GIS overlays"
+      subtitle={`${overlays.length} layer${overlays.length === 1 ? '' : 's'} on this project`}
+      action={
+        <div style={{ display: 'flex', gap: 6 }}>
+          <Button size="sm" variant="ghost"   leftIcon="↥" onClick={() => setAddMode('file')}>Upload file</Button>
+          <Button size="sm" variant="primary" leftIcon="+" onClick={() => setAddMode('url')}>From URL</Button>
+        </div>
+      } dense>
+      {overlays.length === 0 ? (
+        <div style={{ padding: 28, textAlign: 'center', color: 'var(--brand-muted)' }}>
+          <div className="micro" style={{ marginBottom: 8 }}>NO OVERLAYS YET</div>
+          <div style={{ fontSize: 'var(--fs-small)' }}>Upload a GeoJSON/KML/Shapefile file, or add a WFS/WMS endpoint or GeoJSON URL.</div>
+        </div>
+      ) : (
+        <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+          {overlays.map((l, i) => {
+            const routing = isRouting(l);
+            const isPending = pendingId === l.id;
+            return (
+              <li key={l.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px', borderTop: i === 0 ? 'none' : '1px solid var(--brand-line)', flexWrap: 'wrap' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 220 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 'var(--r-sm)', background: routing ? 'var(--brand-warn, #fec060)' : 'var(--brand-gis)' }} />
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ fontSize: 'var(--fs-body)' }}>
+                      {l.name}
+                      {routing && <Pill tone="warn" style={{ marginLeft: 8 }}>routing</Pill>}
+                    </span>
+                    <span className="micro" style={{ display: 'block', marginTop: 2 }}>
+                      {l.layer_type || l.source || '—'}
+                      {l.feature_count != null && ` · ${l.feature_count.toLocaleString()} features`}
+                      {l.geometry_type && ` · ${l.geometry_type}`}
                     </span>
                   </span>
-                  <Toggle checked={!!l.visible} disabled={pendingId === l.id} onChange={() => toggle(l)} />
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
+                </span>
+                <Toggle checked={!!l.visible} disabled={isPending} onChange={() => toggle(l)} />
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  {routing
+                    ? <Button size="sm" variant="ghost" disabled={isPending} onClick={() => unmarkRouting(l)}>Unmark routing</Button>
+                    : <Button size="sm" variant="ghost" disabled={isPending} onClick={() => markRouting(l)}>Mark as routing</Button>}
+                  <Button size="sm" variant="ghost" disabled={isPending} onClick={() => download(l)}>Download</Button>
+                  <Button size="sm" variant="ghost" disabled={isPending} onClick={() => del(l)}>Delete</Button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -1252,7 +1589,7 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
             description="Pick a project from the Projects page to see its details."
             action={<Button variant="primary" onClick={() => { window.location.hash = 'projects'; }}>Back to Projects</Button>} />
         </main>
-        <Footer brand="BIM·GIS Platform · 2026" right={<span>v0.5.0</span>} />
+        <Footer brand="BIM·GIS Platform · 2026" right={<span>v0.5.1</span>} />
       </div>
     );
   }
@@ -1307,7 +1644,7 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
 
       <Footer brand="BIM·GIS Platform · 2026"
         links={[{ href: '#privacy', label: 'Privacy' }, { href: '#status', label: 'Status' }, { href: '#api', label: 'API' }]}
-        right={<span>v0.5.0</span>} />
+        right={<span>v0.5.1</span>} />
 
       <ToastStack>
         {toasts.map(t => <Toast key={t.id} tone={t.tone} title={t.title} description={t.description} onClose={() => setToasts(ts => ts.filter(x => x.id !== t.id))} />)}
