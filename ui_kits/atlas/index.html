@@ -23,6 +23,9 @@
      copy that the legacy /app/* pages already serve so we don't pay a
      second download on Iran-VPS connections. -->
 <script src="/app/vendor/leaflet/leaflet.js"></script>
+<!-- model-viewer (Google) — drives the real AR / VR scene in ARScreen.
+     ES module, lazy-evaluated; <model-viewer> tags below activate it. -->
+<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
 <style>
   html, body, #root { height: 100%; margin: 0; }
   body { background: var(--brand-bg-1); }
