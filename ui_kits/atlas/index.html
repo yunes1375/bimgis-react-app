@@ -5,29 +5,87 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>BIM·GIS Platform</title>
-<link rel="stylesheet" href="/app/atlas-live/styles.css?v=4" />
+<link rel="stylesheet" href="/app/atlas-live/styles.css?v=5" />
 <link rel="icon" type="image/svg+xml" href="/app/atlas-live/assets/brandmark.svg" />
-<script src="/app/atlas-live/_react-auth.js?v=4"></script>
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
-<script src="/app/atlas-live/_ds_bundle.js?v=4"></script>
+<!-- Pre-load critical assets in parallel — saves ~500ms on Iran-VPS network -->
+<link rel="preload" href="/vendor-react/react.production.min.js" as="script" />
+<link rel="preload" href="/vendor-react/react-dom.production.min.js" as="script" />
+<link rel="preload" href="/vendor-react/babel.min.js" as="script" />
+<link rel="preload" href="/app/atlas-live/_react-auth.js?v=5" as="script" />
+<link rel="preload" href="/app/atlas-live/_ds_bundle.js?v=5" as="script" />
+<script src="/app/atlas-live/_react-auth.js?v=5"></script>
+<script src="/vendor-react/react.production.min.js"></script>
+<script src="/vendor-react/react-dom.production.min.js"></script>
+<script src="/vendor-react/babel.min.js"></script>
+<script src="/app/atlas-live/_ds_bundle.js?v=5"></script>
 <style>
   html, body, #root { height: 100%; margin: 0; }
   body { background: var(--brand-bg-1); }
+  /* Boot splash — visible while React + Babel parse + screens compile.
+     The grid + brand mark match the rest of the app so the transition
+     feels instant when React mounts. */
+  #boot-splash {
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; background: var(--brand-bg-1, #090b11); color: #e8ecf1;
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    transition: opacity .25s ease;
+  }
+  #boot-splash.hide { opacity: 0; pointer-events: none; }
+  #boot-splash .mark {
+    width: 48px; height: 48px; border-radius: 6px;
+    background: linear-gradient(135deg, #36e0d4, #ff9a52);
+    display: inline-flex; align-items: center; justify-content: center;
+    color: #090b11; font-weight: 700; font-size: 22px;
+  }
+  #boot-splash .spin {
+    width: 18px; height: 18px; border: 2px solid #36e0d4;
+    border-right-color: transparent; border-radius: 50%;
+    animation: bs .7s linear infinite;
+  }
+  @keyframes bs { to { transform: rotate(360deg); } }
+  #boot-splash .micro {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px;
+    letter-spacing: .08em; text-transform: uppercase; color: #9aa7bd;
+  }
 </style>
 </head>
 <body>
+<div id="boot-splash">
+  <span class="mark">B</span>
+  <span class="micro">BIM·GIS Platform · Loading…</span>
+  <span class="spin"></span>
+</div>
 <div id="root"></div>
-<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/LoginScreen.jsx?v=4"></script>
-<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/ProjectsScreen.jsx?v=4"></script>
-<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/ProjectScreen.jsx?v=4"></script>
-<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/MapWorkspace.jsx?v=4"></script>
-<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/ModelsScreen.jsx?v=4"></script>
-<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/AdminScreen.jsx?v=4"></script>
-<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/ARScreen.jsx?v=4"></script>
-<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/AccountScreen.jsx?v=4"></script>
-<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/LandingScreen.jsx?v=4"></script>
-<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/App.jsx?v=4"></script>
+<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/LoginScreen.jsx?v=5"></script>
+<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/ProjectsScreen.jsx?v=5"></script>
+<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/ProjectScreen.jsx?v=5"></script>
+<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/MapWorkspace.jsx?v=5"></script>
+<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/ModelsScreen.jsx?v=5"></script>
+<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/AdminScreen.jsx?v=5"></script>
+<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/ARScreen.jsx?v=5"></script>
+<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/AccountScreen.jsx?v=5"></script>
+<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/LandingScreen.jsx?v=5"></script>
+<script type="text/babel" src="/app/atlas-live/ui_kits/atlas/App.jsx?v=5"></script>
+<script>
+  // Hide the boot splash once React has actually painted into #root.
+  (function () {
+    var splash = document.getElementById('boot-splash');
+    var root   = document.getElementById('root');
+    var off = function () {
+      if (root && root.children.length > 0) {
+        splash.classList.add('hide');
+        setTimeout(function () { splash.remove(); }, 350);
+        return true;
+      }
+      return false;
+    };
+    if (off()) return;
+    var obs = new MutationObserver(function () { if (off()) obs.disconnect(); });
+    obs.observe(root, { childList: true });
+    // Safety fallback in case something hangs.
+    setTimeout(function () { if (off()) return; splash.classList.add('hide'); }, 15000);
+  })();
+</script>
 </body>
 </html>
