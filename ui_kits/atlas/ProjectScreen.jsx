@@ -440,12 +440,564 @@ function TeamsPanel({ project, push }) {
   );
 }
 
-function OrdersPanel({ project }) {
+// ─── Work Orders tab — project-wide list + stats + filter + edit ─────────
+const _PWO_STATUS_TONE  = { open: 'info', in_progress: 'warn', completed: 'ok', cancelled: 'neutral' };
+const _PWO_PRIO_TONE    = { urgent: 'error', high: 'warn', normal: 'info', low: 'neutral' };
+const _PWO_PAGE = 50;
+
+function WoEditModal({ open, wo, onClose, onSaved, push }) {
+  const [form, setForm] = React.useState({
+    title: '', status: 'open', priority: 'normal', type: 'corrective',
+    safety_requirements: 'none', assigned_to: '', due_date: '', description: '',
+    required_skills: '', estimated_duration_min: '',
+  });
+  const [busy, setBusy] = React.useState(false);
+  const [err,  setErr]  = React.useState(null);
+
+  React.useEffect(() => {
+    if (!open || !wo) return;
+    setErr(null); setBusy(false);
+    setForm({
+      title:                  wo.title || '',
+      status:                 wo.status || 'open',
+      priority:               wo.priority || 'normal',
+      type:                   wo.type || 'corrective',
+      safety_requirements:    wo.safety_requirements || 'none',
+      assigned_to:            wo.assigned_to || '',
+      due_date:               wo.due_date ? new Date(wo.due_date).toISOString().slice(0, 10) : '',
+      description:            wo.description || '',
+      required_skills:        Array.isArray(wo.required_skills) ? wo.required_skills.join(', ') : '',
+      estimated_duration_min: wo.estimated_duration_min ?? '',
+    });
+    const onEsc = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onEsc);
+    return () => document.removeEventListener('keydown', onEsc);
+  }, [open, wo, onClose]);
+
+  if (!open || !wo) return null;
+
+  function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
+
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      const body = {
+        title: form.title.trim(),
+        status: form.status,
+        priority: form.priority,
+        type: form.type,
+        safety_requirements: form.safety_requirements,
+      };
+      if (form.assigned_to.trim())            body.assigned_to            = form.assigned_to.trim();
+      if (form.due_date)                      body.due_date               = form.due_date;
+      if (form.description.trim())            body.description            = form.description.trim();
+      if (form.required_skills.trim())        body.required_skills        = form.required_skills.split(',').map(s => s.trim()).filter(Boolean);
+      if (form.estimated_duration_min !== '') body.estimated_duration_min = Number(form.estimated_duration_min);
+
+      await _api(`/fm/${wo.model_id}/work-orders/${wo.id}`, {
+        method: 'PATCH', body: JSON.stringify(body),
+      });
+      push({ tone: 'success', title: `Updated ${wo.work_order_number || wo.id.slice(0, 8)}` });
+      onSaved();
+      onClose();
+    } catch (e2) {
+      setErr(e2.message);
+      push({ tone: 'error', title: 'Update failed', description: e2.message });
+    } finally { setBusy(false); }
+  }
+
   return (
-    <EmptyState icon="≡"
-      title="Work orders are scoped per-model"
-      description={`This project has ${project.model_count || 0} model(s). Open a model in the 3D map and use the right-rail inspector to create or list work orders for its entities.`}
-      action={<Button size="sm" variant="secondary" onClick={() => { window.location.hash = 'models'; }}>Open Models</Button>} />
+    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(2px)',
+      zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+    }}>
+      <div style={{
+        background: 'var(--brand-surface)', border: '1px solid var(--brand-line-strong)',
+        borderRadius: 'var(--r-lg)', width: 'min(700px, 100%)', maxHeight: '85vh', overflow: 'auto', boxShadow: 'var(--shadow-card)',
+      }} role="dialog" aria-modal="true">
+        <header style={{ padding: '14px 16px', borderBottom: '1px solid var(--brand-line)', display: 'flex', alignItems: 'center', gap: 8, position: 'sticky', top: 0, background: 'var(--brand-surface)', zIndex: 1 }}>
+          <div style={{ flex: 1 }}>
+            <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontSize: 'var(--fs-h3)', fontWeight: 600 }}>Edit work order</h3>
+            <div className="micro" style={{ marginTop: 2 }}>{wo.work_order_number || wo.id.slice(0, 8)} · {wo.model_id}</div>
+          </div>
+          <button onClick={onClose} aria-label="Close" style={{ background: 'transparent', border: '1px solid var(--brand-line-strong)', color: 'var(--brand-muted)', borderRadius: 'var(--r-md)', width: 28, height: 28, fontSize: 18, cursor: 'pointer' }}>×</button>
+        </header>
+        <form onSubmit={submit} style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <Input label="Title" value={form.title} onChange={(e) => set('title', e.target.value)} fullWidth required autoFocus />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+            {[
+              ['status',   ['open','in_progress','completed','cancelled']],
+              ['priority', ['urgent','high','normal','low']],
+              ['type',     ['corrective','preventive','inspection']],
+              ['safety_requirements', ['none','PPE_L1','hot_work','confined_space','electrical_HV','fall_protection','chemical','radiation']],
+            ].map(([k, opts]) => (
+              <div key={k}>
+                <label className="micro" style={{ display: 'block', marginBottom: 4 }}>{k === 'safety_requirements' ? 'Safety' : k}</label>
+                <select value={form[k]} onChange={(e) => set(k, e.target.value)}
+                  style={{ width: '100%', padding: '8px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>
+                  {opts.map(o => <option key={o} value={o}>{o}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
+            <Input label="Assigned to" value={form.assigned_to} onChange={(e) => set('assigned_to', e.target.value)} placeholder="name or username" />
+            <Input label="Due date" type="date" value={form.due_date} onChange={(e) => set('due_date', e.target.value)} />
+          </div>
+          <div>
+            <label className="micro" style={{ display: 'block', marginBottom: 4 }}>Description</label>
+            <textarea value={form.description} onChange={(e) => set('description', e.target.value)} rows={3}
+              style={{ width: '100%', padding: '8px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)', fontFamily: 'inherit', fontSize: 13, resize: 'vertical', boxSizing: 'border-box' }} />
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
+            <Input label="Required skills (comma-separated)" value={form.required_skills} onChange={(e) => set('required_skills', e.target.value)} placeholder="electrical, HVAC" />
+            <Input label="Est. duration (min)" type="number" min="0" step="5" value={form.estimated_duration_min} onChange={(e) => set('estimated_duration_min', e.target.value)} />
+          </div>
+          {err && <div style={{ color: 'var(--brand-error, #f88)', fontSize: 12 }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', paddingTop: 4 }}>
+            <Button type="button" variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+            <Button type="submit" variant="primary" loading={busy} disabled={!form.title.trim() || busy}>{busy ? 'Saving…' : 'Save changes'}</Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function OrdersPanel({ project, push, onOpenMap }) {
+  const mobile = _useIsMobile();
+  const [filter, setFilter] = React.useState({ model_id: '', status: '', priority: '', type: '', safety: '', assigned_to: '', number: '' });
+  const [state, setState]   = React.useState({ items: [], total: 0, has_more: false, loading: true, error: null, offset: 0 });
+  const [stats, setStats]   = React.useState(null);
+  const [modal, setModal]   = React.useState({ open: false, wo: null });
+
+  const buildQs = React.useCallback((append) => {
+    const qs = new URLSearchParams();
+    if (filter.model_id)    qs.set('model_id', filter.model_id);
+    if (filter.number)      qs.set('number', filter.number);
+    if (filter.status)      qs.set('status', filter.status);
+    if (filter.priority)    qs.set('priority', filter.priority);
+    if (filter.type)        qs.set('type', filter.type);
+    if (filter.safety)      qs.set('safety', filter.safety);
+    if (filter.assigned_to) qs.set('assigned_to', filter.assigned_to);
+    qs.set('limit', String(_PWO_PAGE));
+    qs.set('offset', String(append ? state.offset : 0));
+    return qs;
+  }, [filter, state.offset]);
+
+  const load = React.useCallback(async (append = false) => {
+    setState(s => ({ ...s, loading: true }));
+    try {
+      const qs = buildQs(append);
+      const data = await _api(`/projects/${project.id}/work-orders?${qs}`);
+      const page = data.items || [];
+      const items = append ? state.items.concat(page) : page;
+      setState({
+        items, loading: false, error: null,
+        total: typeof data.total === 'number' ? data.total : items.length,
+        has_more: !!data.has_more,
+        offset: (append ? state.offset : 0) + page.length,
+      });
+    } catch (err) {
+      setState(s => ({ ...s, loading: false, error: err.message }));
+    }
+  }, [project.id, buildQs, state.items, state.offset]);
+
+  const loadStats = React.useCallback(async () => {
+    try {
+      const qs = filter.model_id ? `?model_id=${encodeURIComponent(filter.model_id)}` : '';
+      const s = await _api(`/projects/${project.id}/work-orders/stats${qs}`);
+      setStats(s);
+    } catch { setStats(null); }
+  }, [project.id, filter.model_id]);
+
+  React.useEffect(() => {
+    load(false);
+    loadStats();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id, filter.model_id, filter.number, filter.status, filter.priority, filter.type, filter.safety, filter.assigned_to]);
+
+  async function del(wo) {
+    if (!window.confirm(`Delete WO ${wo.work_order_number || wo.id.slice(0, 8)} — "${wo.title}"?`)) return;
+    try {
+      await _api(`/fm/${wo.model_id}/work-orders/${wo.id}`, { method: 'DELETE' });
+      push({ tone: 'success', title: `Deleted ${wo.work_order_number || wo.id.slice(0, 8)}` });
+      load(false); loadStats();
+    } catch (err) {
+      push({ tone: 'error', title: 'Delete failed', description: err.message });
+    }
+  }
+
+  function setF(k, v) { setState(s => ({ ...s, offset: 0 })); setFilter(f => ({ ...f, [k]: v })); }
+
+  const totalCount = stats && typeof stats.total === 'number' ? stats.total : state.total;
+  const byStatus   = (stats && stats.by_status)   || {};
+  const byPriority = (stats && stats.by_priority) || {};
+
+  const cols = [
+    { key: 'number', header: '#', render: r => <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.work_order_number || r.id.slice(0, 8)}</span> },
+    { key: 'title',  header: 'Title', render: r => (
+      <div>
+        <strong style={{ fontWeight: 600 }}>{r.title}</strong>
+        {r.assigned_to && <div className="micro" style={{ marginTop: 2 }}>{r.assigned_to}</div>}
+      </div>
+    ) },
+    { key: 'model',  header: 'Model', render: r => <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--brand-muted)' }}>{r.model_id}</span> },
+    { key: 'flags',  header: 'Status · priority · type', render: r => (
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+        <Pill tone={_PWO_STATUS_TONE[r.status] || 'neutral'} dot>{r.status}</Pill>
+        <Pill tone={_PWO_PRIO_TONE[r.priority] || 'neutral'}>{r.priority}</Pill>
+        <span className="micro">{r.type}</span>
+      </div>
+    ) },
+    { key: 'safety', header: 'Safety', render: r => (r.safety_requirements && r.safety_requirements !== 'none')
+      ? <Pill tone="warn">{r.safety_requirements}</Pill>
+      : <span className="micro">—</span> },
+    { key: 'due',    header: 'Due / closed', render: r => {
+      const due = r.due_date ? new Date(r.due_date).toISOString().slice(0, 10) : '';
+      const closed = r.completion_date ? new Date(r.completion_date).toISOString().slice(0, 10) : '';
+      if (closed) return <span style={{ fontSize: 11, color: 'var(--brand-muted)' }}>closed {closed}</span>;
+      if (due)    return <span style={{ fontSize: 11, color: 'var(--brand-text)' }}>due {due}</span>;
+      return <span className="micro">—</span>;
+    } },
+  ];
+  const actions = r => (
+    <React.Fragment>
+      <Button size="sm" variant="ghost" onClick={() => setModal({ open: true, wo: r })}>Edit</Button>
+      <a href={`/app/viewer.html?model=${encodeURIComponent(r.model_id)}&focus=${encodeURIComponent(r.entity_global_id || '')}&project=${encodeURIComponent(project.id)}`}
+         target="_blank" rel="noopener noreferrer"
+         style={{ fontSize: 12, color: 'var(--brand-bim)', textDecoration: 'none', borderBottom: '1px dotted', alignSelf: 'center' }}>3D</a>
+      <Button size="sm" variant="ghost" onClick={() => del(r)}>Delete</Button>
+    </React.Fragment>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* ── Stats card ── */}
+      <Card title="Dashboard" subtitle={`${totalCount} work order${totalCount === 1 ? '' : 's'} in this project`}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+          <KpiTile label="Total" value={totalCount} />
+          <KpiTile label="Open" value={byStatus.open || 0} tone="info" />
+          <KpiTile label="In progress" value={byStatus.in_progress || 0} tone="warn" />
+          <KpiTile label="Completed" value={byStatus.completed || 0} tone="ok" />
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 14 }}>
+          {['urgent','high','normal','low'].map(p => (byPriority[p] || 0) > 0 && (
+            <Pill key={p} tone={_PWO_PRIO_TONE[p] || 'neutral'}>{p}: {byPriority[p]}</Pill>
+          ))}
+        </div>
+      </Card>
+
+      {/* ── Filter + table ── */}
+      <Card title="Work orders"
+        subtitle={state.loading ? 'loading…' : `showing ${state.items.length} of ${state.total}`}
+        dense>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, padding: '10px 14px', borderBottom: '1px solid var(--brand-line)' }}>
+          <Input size="sm" placeholder="WO #" value={filter.number} onChange={(e) => setF('number', e.target.value)} />
+          {[
+            ['status',   ['', 'open','in_progress','completed','cancelled']],
+            ['priority', ['', 'urgent','high','normal','low']],
+            ['type',     ['', 'corrective','preventive','inspection']],
+          ].map(([k, opts]) => (
+            <select key={k} value={filter[k]} onChange={(e) => setF(k, e.target.value)}
+              style={{ padding: '6px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)', fontSize: 13 }}>
+              {opts.map(o => <option key={o || 'all'} value={o}>{o ? o : `— all ${k} —`}</option>)}
+            </select>
+          ))}
+          <Input size="sm" placeholder="Assignee" value={filter.assigned_to} onChange={(e) => setF('assigned_to', e.target.value)} />
+        </div>
+
+        {state.loading && state.items.length === 0 ? (
+          <div style={{ padding: 30, textAlign: 'center' }}><Spinner size="sm" /></div>
+        ) : state.error ? (
+          <div style={{ padding: 20, textAlign: 'center', color: 'var(--brand-error, #f88)', fontSize: 13 }}>{state.error}</div>
+        ) : state.items.length === 0 ? (
+          <div style={{ padding: 28, textAlign: 'center', color: 'var(--brand-muted)' }}>
+            <div className="micro" style={{ marginBottom: 8 }}>NO WORK ORDERS MATCH THIS FILTER</div>
+            <div style={{ fontSize: 'var(--fs-small)' }}>Create work orders from the 3D viewer's right-rail inspector — pick an entity, then "+ new WO".</div>
+            <div style={{ marginTop: 12 }}><Button size="sm" variant="secondary" onClick={onOpenMap}>Open 3D viewer</Button></div>
+          </div>
+        ) : (
+          <React.Fragment>
+            {mobile
+              ? <StackedCardTable columns={cols} rows={state.items} rowKey={r => r.id} actions={actions} />
+              : <DataTable columns={cols} rows={state.items} rowKey={r => r.id} caption="" actions={actions} />}
+            {state.has_more && (
+              <div style={{ padding: 12, textAlign: 'center' }}>
+                <Button size="sm" variant="ghost" onClick={() => load(true)} disabled={state.loading}>
+                  {state.loading ? 'Loading…' : 'Load more'}
+                </Button>
+              </div>
+            )}
+          </React.Fragment>
+        )}
+      </Card>
+
+      <WoEditModal open={modal.open} wo={modal.wo} onClose={() => setModal({ open: false, wo: null })}
+        onSaved={() => { load(false); loadStats(); }} push={push} />
+    </div>
+  );
+}
+
+// ─── Optimize tab — MDVRP-TW solver UI via SSE ────────────────────────────
+function OptimizePanel({ project, push }) {
+  const [solver, setSolver] = React.useState('ga');
+  const [shared, setShared] = React.useState({ cruise_kmh: 30, service_minutes: 15, wo_per_member: 5 });
+  const [ga, setGa]         = React.useState({ population: 80, generations: 120, crossover_rate: 0.85, mutation_rate: 0.20, alpha_time: 0, capacity_penalty_m: 500, beta_priority: 0, seed: '' });
+  const [ot, setOt]         = React.useState({ ot_time_limit_s: 30, ot_first_solution: 'PATH_CHEAPEST_ARC', ot_metaheuristic: 'GUIDED_LOCAL_SEARCH' });
+  const [roadLayerId, setRoadLayerId] = React.useState('');
+  const [routingLayers, setRoutingLayers] = React.useState([]);
+  const [running, setRunning]   = React.useState(false);
+  const [progress, setProgress] = React.useState(0);
+  const [status, setStatus]     = React.useState('');
+  const [log, setLog]           = React.useState([]);
+  const [summary, setSummary]   = React.useState(null);
+  const [history, setHistory]   = React.useState([]);
+  const esRef = React.useRef(null);
+
+  React.useEffect(() => () => { if (esRef.current) esRef.current.close(); }, []);
+
+  const loadHistory = React.useCallback(async () => {
+    try {
+      const data = await _api(`/projects/${project.id}/optimize/runs`);
+      setHistory(data.items || []);
+    } catch { setHistory([]); }
+  }, [project.id]);
+
+  const loadLayers = React.useCallback(async () => {
+    try {
+      const data = await _api(`/projects/${project.id}/gis-layers`);
+      const rl = (data.layers || []).filter(l => l.is_routing || l.routing || (l.layer_type || '').includes('routing'));
+      setRoutingLayers(rl);
+    } catch { setRoutingLayers([]); }
+  }, [project.id]);
+
+  React.useEffect(() => { loadHistory(); loadLayers(); }, [loadHistory, loadLayers]);
+
+  function appendLog(line) {
+    setLog(L => [...L.slice(-200), `[${new Date().toLocaleTimeString()}] ${line}`]);
+  }
+
+  async function deleteRun(id) {
+    if (!window.confirm('Delete this run from history?')) return;
+    try {
+      await _api(`/projects/${project.id}/optimize/runs/${id}`, { method: 'DELETE' });
+      push({ tone: 'success', title: 'Run deleted' });
+      loadHistory();
+    } catch (err) {
+      push({ tone: 'error', title: 'Delete failed', description: err.message });
+    }
+  }
+
+  function run() {
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    setRunning(true); setProgress(0); setStatus('starting…'); setLog([]); setSummary(null);
+
+    const params = new URLSearchParams({
+      solver,
+      cruise_kmh: String(shared.cruise_kmh),
+      service_minutes: String(shared.service_minutes),
+      wo_per_member: String(shared.wo_per_member),
+    });
+    if (roadLayerId) params.set('use_road_network', 'true');
+    if (solver === 'ortools') {
+      params.set('ot_time_limit_s',    String(ot.ot_time_limit_s));
+      params.set('ot_first_solution',  ot.ot_first_solution);
+      params.set('ot_metaheuristic',   ot.ot_metaheuristic);
+    } else {
+      params.set('population',          String(ga.population));
+      params.set('generations',         String(ga.generations));
+      params.set('crossover_rate',      String(ga.crossover_rate));
+      params.set('mutation_rate',       String(ga.mutation_rate));
+      params.set('alpha_time',          String(ga.alpha_time));
+      params.set('capacity_penalty_m',  String(ga.capacity_penalty_m));
+      params.set('beta_priority',       String(ga.beta_priority));
+      if (ga.seed !== '') params.set('seed', String(ga.seed));
+    }
+    const token = window.PlatformAuth && window.PlatformAuth.getToken && window.PlatformAuth.getToken();
+    if (token) params.set('token', token);
+
+    const url = `/projects/${project.id}/optimize/run?${params}`;
+    const es = new EventSource(url);
+    esRef.current = es;
+
+    es.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.type === 'hello') {
+        const which = m.config && m.config.solver === 'ortools'
+          ? `OR-Tools (${(m.config.metaheuristic || '').replace(/_/g, ' ').toLowerCase()}, time limit ${m.config.time_limit_s}s)`
+          : `GA — population ${m.config && m.config.population}, max ${m.config && m.config.generations} gens`;
+        setStatus(`running ${which}`);
+        appendLog(`running ${which}`);
+      } else if (m.type === 'progress') {
+        if (typeof m.generation === 'number' && typeof m.total_generations === 'number') {
+          const pct = Math.round(100 * m.generation / m.total_generations);
+          setProgress(pct);
+          setStatus(`gen ${m.generation}/${m.total_generations}  ·  best ${m.best_distance != null ? Math.round(m.best_distance).toLocaleString() : '?'} m`);
+        } else if (m.message) {
+          appendLog(m.message);
+        }
+      } else if (m.type === 'done') {
+        setProgress(100);
+        setStatus(`done — ${m.summary && m.summary.routes_count != null ? `${m.summary.routes_count} route(s)` : 'finished'}`);
+        setSummary(m.summary || m.result || m);
+        appendLog(`done · run_id=${m.run_id || '?'}`);
+        setRunning(false);
+        es.close(); esRef.current = null;
+        loadHistory();
+      } else if (m.type === 'error') {
+        setStatus(`error: ${m.message || 'unknown'}`);
+        appendLog(`ERROR: ${m.message || 'unknown'}`);
+        push({ tone: 'error', title: 'Optimize failed', description: m.message });
+        setRunning(false);
+        es.close(); esRef.current = null;
+      }
+    };
+    es.onerror = () => {
+      if (es.readyState === EventSource.CLOSED) return;
+      setStatus('SSE connection lost');
+      appendLog('SSE connection lost');
+      setRunning(false);
+      es.close(); esRef.current = null;
+    };
+  }
+
+  function stop() {
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    setRunning(false); setStatus('stopped by user');
+  }
+
+  function input(label, val, onChange, opts) {
+    return <Input label={label} type="number" value={val} onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))} {...(opts || {})} />;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Card title="MDVRP-TW scheduler"
+        subtitle="Solve a multi-depot vehicle routing problem with time windows over this project's open work orders.">
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 12, marginBottom: 12 }}>
+          <div>
+            <label className="micro" style={{ display: 'block', marginBottom: 4 }}>Solver</label>
+            <select value={solver} onChange={(e) => setSolver(e.target.value)} disabled={running}
+              style={{ width: '100%', padding: '8px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>
+              <option value="ga">Genetic Algorithm (evolutionary, fast)</option>
+              <option value="ortools">OR-Tools (CP-SAT + local search)</option>
+            </select>
+          </div>
+          <div>
+            <label className="micro" style={{ display: 'block', marginBottom: 4 }}>Routing layer (optional, enables pgRouting)</label>
+            <select value={roadLayerId} onChange={(e) => setRoadLayerId(e.target.value)} disabled={running}
+              style={{ width: '100%', padding: '8px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>
+              <option value="">— none (straight-line Haversine) —</option>
+              {routingLayers.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 12 }}>
+          {input('Cruise km/h',   shared.cruise_kmh,      (v) => setShared(s => ({ ...s, cruise_kmh: v })),      { min: 1, max: 200, step: 1 })}
+          {input('Service min/WO',shared.service_minutes, (v) => setShared(s => ({ ...s, service_minutes: v })), { min: 0, max: 600, step: 1 })}
+          {input('WOs / member',  shared.wo_per_member,   (v) => setShared(s => ({ ...s, wo_per_member: v })),   { min: 0.5, max: 100, step: 0.5 })}
+        </div>
+
+        {solver === 'ga' ? (
+          <React.Fragment>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 12 }}>
+              {input('Population', ga.population,  (v) => setGa(g => ({ ...g, population: v })),  { min: 10, max: 400 })}
+              {input('Generations',ga.generations, (v) => setGa(g => ({ ...g, generations: v })), { min: 5,  max: 2000 })}
+              {input('Crossover',  ga.crossover_rate, (v) => setGa(g => ({ ...g, crossover_rate: v })), { min: 0, max: 1, step: 0.05 })}
+              {input('Mutation',   ga.mutation_rate,  (v) => setGa(g => ({ ...g, mutation_rate: v })),  { min: 0, max: 1, step: 0.05 })}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 12 }}>
+              {input('α (time weight)',   ga.alpha_time,         (v) => setGa(g => ({ ...g, alpha_time: v })),         { min: 0, max: 10, step: 0.1 })}
+              {input('Capacity penalty',  ga.capacity_penalty_m, (v) => setGa(g => ({ ...g, capacity_penalty_m: v })), { min: 0, max: 100000, step: 50 })}
+              {input('β priority',        ga.beta_priority,      (v) => setGa(g => ({ ...g, beta_priority: v })),      { min: 0, max: 100, step: 0.05 })}
+              <Input label="Seed (blank = random)" type="number" value={ga.seed} onChange={(e) => setGa(g => ({ ...g, seed: e.target.value }))} placeholder="random" />
+            </div>
+          </React.Fragment>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 12 }}>
+            {input('Time limit (s)', ot.ot_time_limit_s, (v) => setOt(o => ({ ...o, ot_time_limit_s: v })), { min: 5, max: 600 })}
+            <div>
+              <label className="micro" style={{ display: 'block', marginBottom: 4 }}>First solution</label>
+              <select value={ot.ot_first_solution} onChange={(e) => setOt(o => ({ ...o, ot_first_solution: e.target.value }))}
+                style={{ width: '100%', padding: '8px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>
+                {['PATH_CHEAPEST_ARC','SAVINGS','PARALLEL_CHEAPEST_INSERTION','CHRISTOFIDES','AUTOMATIC'].map(o => <option key={o} value={o}>{o.replace(/_/g, ' ').toLowerCase()}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="micro" style={{ display: 'block', marginBottom: 4 }}>Metaheuristic</label>
+              <select value={ot.ot_metaheuristic} onChange={(e) => setOt(o => ({ ...o, ot_metaheuristic: e.target.value }))}
+                style={{ width: '100%', padding: '8px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>
+                {['GUIDED_LOCAL_SEARCH','TABU_SEARCH','SIMULATED_ANNEALING','GREEDY_DESCENT','AUTOMATIC'].map(o => <option key={o} value={o}>{o.replace(/_/g, ' ').toLowerCase()}</option>)}
+              </select>
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          {running
+            ? <Button variant="ghost" onClick={stop}>Stop</Button>
+            : <Button variant="primary" leftIcon="▶" onClick={run}>Run optimiser</Button>}
+        </div>
+      </Card>
+
+      {(running || progress > 0 || summary) && (
+        <Card title="Progress" subtitle={status}>
+          <div style={{ height: 8, background: 'rgba(255,255,255,0.06)', borderRadius: 4, overflow: 'hidden', marginBottom: 12 }}>
+            <div style={{ height: '100%', width: `${progress}%`, background: 'linear-gradient(90deg, var(--brand-bim), var(--brand-gis))', transition: 'width 200ms' }} />
+          </div>
+          {log.length > 0 && (
+            <pre style={{
+              margin: 0, padding: 10, background: 'var(--brand-bg-2)', borderRadius: 'var(--r-md)',
+              fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--brand-muted)',
+              maxHeight: 200, overflow: 'auto', whiteSpace: 'pre-wrap',
+            }}>{log.join('\n')}</pre>
+          )}
+          {summary && (
+            <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
+              {[
+                ['Total distance', summary.total_distance_m != null ? `${Math.round(summary.total_distance_m / 1000)} km` : '—'],
+                ['Routes',         summary.routes_count != null ? summary.routes_count : (summary.routes ? summary.routes.length : '—')],
+                ['Unserved',       summary.unserved_count != null ? summary.unserved_count : '—'],
+                ['Run ID',         summary.run_id || summary.id || '—'],
+              ].map(([k, v]) => (
+                <div key={k} style={{ padding: 10, background: 'var(--brand-bg-2)', border: '1px solid var(--brand-line)', borderRadius: 'var(--r-md)' }}>
+                  <div className="micro">{k}</div>
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 14, color: 'var(--brand-text)', marginTop: 4 }}>{String(v)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
+      <Card title="Run history" subtitle={`${history.length} saved run${history.length === 1 ? '' : 's'}`} dense>
+        {history.length === 0 ? (
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--brand-muted)' }} className="micro">NO SAVED RUNS YET</div>
+        ) : (
+          <ul style={{ listStyle: 'none', margin: 0, padding: 0, maxHeight: 320, overflow: 'auto' }}>
+            {history.map((h, i) => (
+              <li key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderTop: i === 0 ? 'none' : '1px solid var(--brand-line)' }}>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--brand-text)' }}>{h.id.slice(0, 8)}</span>
+                  <span className="micro" style={{ marginLeft: 8 }}>
+                    {h.created_at ? _fmtDate(h.created_at) : ''}
+                    {h.solver ? ` · ${h.solver}` : ''}
+                    {h.total_distance_m != null ? ` · ${Math.round(h.total_distance_m / 1000)} km` : ''}
+                    {h.routes_count != null ? ` · ${h.routes_count} route${h.routes_count === 1 ? '' : 's'}` : ''}
+                  </span>
+                </span>
+                <a href={`/projects/${project.id}/optimize/runs/${h.id}/export.zip${(window.PlatformAuth && window.PlatformAuth.getToken && window.PlatformAuth.getToken()) ? '?token=' + encodeURIComponent(window.PlatformAuth.getToken()) : ''}`}
+                   style={{ fontSize: 12, color: 'var(--brand-bim)', textDecoration: 'none' }}>Export .zip</a>
+                <Button size="sm" variant="ghost" onClick={() => deleteRun(h.id)}>Delete</Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+    </div>
   );
 }
 
@@ -700,7 +1252,7 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
             description="Pick a project from the Projects page to see its details."
             action={<Button variant="primary" onClick={() => { window.location.hash = 'projects'; }}>Back to Projects</Button>} />
         </main>
-        <Footer brand="BIM·GIS Platform · 2026" right={<span>v0.4.0</span>} />
+        <Footer brand="BIM·GIS Platform · 2026" right={<span>v0.5.0</span>} />
       </div>
     );
   }
@@ -713,6 +1265,7 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
     { value: 'models',    label: 'Models',       count: project.model_count ?? models.items.length },
     { value: 'teams',     label: 'Teams' },
     { value: 'orders',    label: 'Work orders' },
+    { value: 'optimize',  label: 'Optimize' },
     { value: 'overlays',  label: 'GIS overlays', count: overlays.items.length },
     { value: 'sharing',   label: 'Sharing' },
   ];
@@ -746,14 +1299,15 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
         {tab === 'overview'  && <OverviewPanel project={project} models={models.items} modelsLoading={models.loading} overlays={overlays.items} overlaysLoading={overlays.loading} />}
         {tab === 'models'    && <ModelsPanel mobile={mobile} models={models.items} loading={models.loading} project={project} onOpenMap={onOpenMap} push={push} refresh={loadModels} />}
         {tab === 'teams'     && <TeamsPanel project={project} push={push} />}
-        {tab === 'orders'    && <OrdersPanel project={project} />}
+        {tab === 'orders'    && <OrdersPanel project={project} push={push} onOpenMap={onOpenMap} />}
+        {tab === 'optimize'  && <OptimizePanel project={project} push={push} />}
         {tab === 'overlays'  && <OverlaysPanel project={project} overlays={overlays.items} loading={overlays.loading} push={push} refresh={loadOverlays} />}
         {tab === 'sharing'   && <SharingPanel project={project} who={who} push={push} />}
       </main>
 
       <Footer brand="BIM·GIS Platform · 2026"
         links={[{ href: '#privacy', label: 'Privacy' }, { href: '#status', label: 'Status' }, { href: '#api', label: 'API' }]}
-        right={<span>v0.4.0</span>} />
+        right={<span>v0.5.0</span>} />
 
       <ToastStack>
         {toasts.map(t => <Toast key={t.id} tone={t.tone} title={t.title} description={t.description} onClose={() => setToasts(ts => ts.filter(x => x.id !== t.id))} />)}
