@@ -115,7 +115,7 @@ function _useLeafletMap(divRef, opts) {
   return ref;
 }
 
-function RouteMap({ routes, height = 380 }) {
+function RouteMap({ routes, roadGeoms, height = 380 }) {
   const divRef = React.useRef(null);
   const mapRef = _useLeafletMap(divRef);
   const layerRef = React.useRef(null);
@@ -125,6 +125,15 @@ function RouteMap({ routes, height = 380 }) {
     if (!layerRef.current) layerRef.current = L.layerGroup().addTo(map);
     layerRef.current.clearLayers();
     const bounds = [];
+    // Map team_index → GeoJSON feature_collection from the pgRouting
+    // back-end so we draw real road-following polylines instead of
+    // dashed straight lines when a routing layer was used.
+    const roadByTeam = new Map();
+    (roadGeoms && roadGeoms.teams || []).forEach(t => {
+      if (t && typeof t.team_index === 'number' && t.feature_collection) {
+        roadByTeam.set(t.team_index, t.feature_collection);
+      }
+    });
     (routes || []).forEach((r, i) => {
       const colour = _teamColor(i);
       // Team home (depot)
@@ -139,11 +148,22 @@ function RouteMap({ routes, height = 380 }) {
           .addTo(layerRef.current).bindTooltip(`<b>${r.team_name || `Team ${i+1}`}</b><br>depot`, { direction: 'top' });
         bounds.push([r.team_lat, r.team_lon]);
       }
-      // Stops + polyline
       const stops = (r.stops || []).filter(s => s.lat != null && s.lon != null);
-      if (stops.length > 0 && r.team_lat != null && r.team_lon != null) {
+      const teamIdx = r.team_index != null ? r.team_index : i;
+      const fc = roadByTeam.get(teamIdx);
+      if (fc) {
+        // Real road geometry from pgRouting — solid coloured polylines.
+        const gj = L.geoJSON(fc, {
+          style: () => ({ color: colour, weight: 4, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }),
+        }).addTo(layerRef.current);
+        try { const b = gj.getBounds(); if (b.isValid()) { bounds.push([b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]); } } catch {}
+      } else if (stops.length > 0 && r.team_lat != null && r.team_lon != null) {
+        // Straight-line fallback — dashed so the user knows it's not
+        // following any road network (either none was picked, or
+        // pgRouting couldn't reach some stops and fell back to
+        // Haversine).
         const path = [[r.team_lat, r.team_lon], ...stops.map(s => [s.lat, s.lon])];
-        L.polyline(path, { color: colour, weight: 3, opacity: 0.85, lineCap: 'round', lineJoin: 'round' })
+        L.polyline(path, { color: colour, weight: 3, opacity: 0.7, lineCap: 'round', lineJoin: 'round', dashArray: roadGeoms ? '4,6' : null })
           .addTo(layerRef.current);
         path.forEach(p => bounds.push(p));
       }
@@ -167,7 +187,7 @@ function RouteMap({ routes, height = 380 }) {
       });
     });
     if (bounds.length > 0) map.fitBounds(bounds, { padding: [25, 25], maxZoom: 16 });
-  }, [routes, mapRef]);
+  }, [routes, roadGeoms, mapRef]);
 
   if (!window.L) {
     return (
@@ -179,26 +199,58 @@ function RouteMap({ routes, height = 380 }) {
   return <div ref={divRef} style={{ width: '100%', height, borderRadius: 'var(--r-md)', overflow: 'hidden', background: '#1c222d' }} />;
 }
 
-function LayerPreviewMap({ project, overlays, height = 340 }) {
+function LayerPreviewMap({ project, overlays, height = 380 }) {
   const divRef = React.useRef(null);
   const mapRef = _useLeafletMap(divRef);
-  const layerRef = React.useRef(null);
-  const cacheRef = React.useRef({});
+  const groupRef     = React.useRef(null);            // L.layerGroup container
+  const renderedRef  = React.useRef(new Map());       // layer_id -> L.geoJSON
+  const cacheRef     = React.useRef({});              // layer_id -> GeoJSON
+  const colorRef     = React.useRef({});              // layer_id -> hex
+  const palette      = ['#36e0d4', '#ff9a52', '#6a9be8', '#e870c2', '#a0e060', '#fec060', '#fec', '#b48aff'];
+  // Local visibility map (key = layer_id, true = drawn on this preview).
+  // Defaults: any layer the backend marks visible starts shown; the user
+  // can toggle independently without changing the persisted setting.
+  const [shown, setShown] = React.useState(() => {
+    const m = {};
+    (overlays || []).forEach(l => { m[l.id] = !!l.visible; });
+    return m;
+  });
+  // When overlays prop changes (new layer added/removed), top-up the
+  // shown map with sensible defaults for unseen ids.
+  React.useEffect(() => {
+    setShown(prev => {
+      const next = { ...prev };
+      let touched = false;
+      (overlays || []).forEach((l, i) => {
+        if (!(l.id in next)) { next[l.id] = !!l.visible; touched = true; }
+        if (!colorRef.current[l.id]) colorRef.current[l.id] = palette[i % palette.length];
+      });
+      return touched ? next : prev;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlays]);
 
+  // Wire each toggle to its Leaflet layer — fetch lazily, cache forever.
   React.useEffect(() => {
     const map = mapRef.current; if (!map || !window.L) return;
     const L = window.L;
-    if (!layerRef.current) layerRef.current = L.layerGroup().addTo(map);
-    layerRef.current.clearLayers();
-    const visible = (overlays || []).filter(l => l.visible);
-    if (visible.length === 0) return;
-    const palette = ['#36e0d4', '#ff9a52', '#6a9be8', '#e870c2', '#a0e060', '#fec060'];
-    const allBounds = [];
+    if (!groupRef.current) groupRef.current = L.layerGroup().addTo(map);
     let cancelled = false;
+
     (async () => {
-      for (let i = 0; i < visible.length; i++) {
-        const l = visible[i];
-        const color = palette[i % palette.length];
+      // Phase 1: remove anything that's been turned off.
+      for (const [lid, lyr] of renderedRef.current.entries()) {
+        if (!shown[lid]) { groupRef.current.removeLayer(lyr); renderedRef.current.delete(lid); }
+      }
+      // Phase 2: add anything that's on but not yet rendered.
+      const allBounds = [];
+      for (const l of (overlays || [])) {
+        if (!shown[l.id]) continue;
+        if (renderedRef.current.has(l.id)) {
+          const lyr = renderedRef.current.get(l.id);
+          try { const b = lyr.getBounds(); if (b.isValid()) allBounds.push([b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]); } catch {}
+          continue;
+        }
         let geo = cacheRef.current[l.id];
         if (!geo) {
           try {
@@ -209,6 +261,7 @@ function LayerPreviewMap({ project, overlays, height = 340 }) {
           } catch { continue; }
         }
         if (cancelled || !geo) continue;
+        const color = colorRef.current[l.id] || palette[0];
         try {
           const gj = L.geoJSON(geo, {
             style: () => ({ color, weight: 2, opacity: 0.85, fillOpacity: 0.25, fillColor: color }),
@@ -219,18 +272,19 @@ function LayerPreviewMap({ project, overlays, height = 340 }) {
                 lyr.bindTooltip(String(lbl), { sticky: true });
               }
             },
-          }).addTo(layerRef.current);
+          }).addTo(groupRef.current);
+          renderedRef.current.set(l.id, gj);
           const b = gj.getBounds();
           if (b.isValid()) {
             allBounds.push([b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]);
-            // Refit progressively so first layer shows immediately
             map.fitBounds(allBounds, { padding: [20, 20], maxZoom: 16 });
           }
         } catch { /* skip bad layer */ }
       }
     })();
     return () => { cancelled = true; };
-  }, [project.id, overlays, mapRef]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id, overlays, shown, mapRef]);
 
   if (!window.L) {
     return (
@@ -239,7 +293,50 @@ function LayerPreviewMap({ project, overlays, height = 340 }) {
       </div>
     );
   }
-  return <div ref={divRef} style={{ width: '100%', height, borderRadius: 'var(--r-md)', overflow: 'hidden', background: '#1c222d' }} />;
+
+  return (
+    <div className="bp-gis-preview" style={{
+      display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 200px', gap: 10, alignItems: 'stretch',
+    }}>
+      {/* The map itself */}
+      <div ref={divRef} style={{ width: '100%', height, borderRadius: 'var(--r-md)', overflow: 'hidden', background: '#1c222d' }} />
+
+      {/* Side panel — checkbox per layer + colour swatch */}
+      <div style={{
+        height, overflow: 'auto', padding: 10,
+        background: 'var(--brand-bg-2)', border: '1px solid var(--brand-line)', borderRadius: 'var(--r-md)',
+        display: 'flex', flexDirection: 'column', gap: 6,
+      }}>
+        <div className="micro" style={{ marginBottom: 4 }}>SHOW ON MAP</div>
+        {(overlays || []).length === 0 ? (
+          <div style={{ fontSize: 11, color: 'var(--brand-muted)' }}>No layers yet.</div>
+        ) : (overlays || []).map((l, i) => {
+          const color = colorRef.current[l.id] || palette[i % palette.length];
+          const on = !!shown[l.id];
+          return (
+            <label key={l.id} style={{
+              display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+              padding: '4px 6px', borderRadius: 'var(--r-sm)',
+              background: on ? 'rgba(255,255,255,0.04)' : 'transparent',
+            }}>
+              <input type="checkbox" checked={on}
+                onChange={(e) => setShown(s => ({ ...s, [l.id]: e.target.checked }))}
+                style={{ accentColor: color, cursor: 'pointer' }} />
+              <span style={{ width: 10, height: 10, borderRadius: 2, background: color, flexShrink: 0 }} />
+              <span style={{
+                fontSize: 12, color: on ? 'var(--brand-text)' : 'var(--brand-muted)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                flex: 1, minWidth: 0,
+              }} title={l.name}>{l.name}</span>
+              {l.feature_count != null && (
+                <span style={{ fontSize: 9, color: 'var(--brand-faint)', fontFamily: 'var(--font-mono)' }}>{l.feature_count.toLocaleString()}</span>
+              )}
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 // ─── Tab panels ───────────────────────────────────────────────────────────
@@ -1591,6 +1688,7 @@ function OptimizePanel({ project, push }) {
   const [log, setLog]               = React.useState([]);
   const [result, setResult]         = React.useState(null);   // full done-message OR loaded run
   const [history, setHistory]       = React.useState([]);
+  const [roadGeoms, setRoadGeoms]   = React.useState(null);   // { teams: [{team_index, feature_collection}] }
   const [loadingRun, setLoadingRun] = React.useState(null);
   const esRef = React.useRef(null);
 
@@ -1604,12 +1702,16 @@ function OptimizePanel({ project, push }) {
   }, [project.id]);
 
   const loadLayers = React.useCallback(async () => {
+    // Same endpoint as legacy: /routing-layers returns every project
+    // layer the backend considers a candidate road network, each tagged
+    // with a "sentinel" string we pass back to /optimize/run plus a
+    // status block with edge / vertex counts.
     try {
-      const data = await _api(`/projects/${project.id}/gis-layers`);
-      const rl = (data.layers || []).filter(l => l.is_routing || l.routing || (l.layer_type || '').toLowerCase().includes('routing'));
-      setRoutingLayers(rl);
+      const data = await _api(`/projects/${project.id}/routing-layers`);
+      setRoutingLayers(data.items || []);
+      if (data.active && !roadLayerId) setRoadLayerId(data.active);
     } catch { setRoutingLayers([]); }
-  }, [project.id]);
+  }, [project.id]);  // roadLayerId not in deps — we set it once on load
 
   React.useEffect(() => { loadHistory(); loadLayers(); }, [loadHistory, loadLayers]);
 
@@ -1619,14 +1721,47 @@ function OptimizePanel({ project, push }) {
 
   async function loadRun(id) {
     setLoadingRun(id);
+    setRoadGeoms(null);
     try {
       const run = await _api(`/projects/${project.id}/optimize/runs/${id}`);
       setResult(run);
       setProgress(100);
       setStatus(`loaded run ${id.slice(0, 8)}`);
+      // Best-effort: if this run used a road network, fetch its real
+      // polylines so the map shows them instead of straight lines.
+      _api(`/projects/${project.id}/optimize/runs/${encodeURIComponent(id)}/road-geometries`)
+        .then(setRoadGeoms).catch(() => {});
     } catch (err) {
       push({ tone: 'error', title: 'Could not load run', description: err.message });
     } finally { setLoadingRun(null); }
+  }
+
+  async function openIn3DViewer() {
+    if (!result || !(result.run_id || result.id)) {
+      push({ tone: 'warn', title: 'No run loaded', description: 'Run the optimiser or load a saved run first.' });
+      return;
+    }
+    const runId = result.run_id || result.id;
+    try {
+      // Need the project's first model_id for the viewer's tileset
+      // (matches legacy /v0/ behaviour — the viewer always opens
+      // around one model, with the routes drawn on top of its
+      // basemap).
+      const p = await _api(`/projects/${project.id}`);
+      const firstModel = (p.model_ids || [])[0];
+      if (!firstModel) {
+        push({ tone: 'warn', title: 'No model to anchor the viewer',
+          description: 'This project needs at least one ingested model before the 3D route view can open.' });
+        return;
+      }
+      const url = `/app/viewer.html?model=${encodeURIComponent(firstModel)}` +
+                  `&project=${encodeURIComponent(project.id)}` +
+                  `&routes=${encodeURIComponent(project.id)}` +
+                  `&run=${encodeURIComponent(runId)}`;
+      window.open(url, '_blank', 'noopener');
+    } catch (err) {
+      push({ tone: 'error', title: 'Could not open viewer', description: err.message });
+    }
   }
 
   async function deleteRun(id) {
@@ -1652,7 +1787,14 @@ function OptimizePanel({ project, push }) {
       service_minutes: String(shared.service_minutes),
       wo_per_member: String(shared.wo_per_member),
     });
-    if (roadLayerId) params.set('use_road_network', 'true');
+    if (roadLayerId) {
+      // The sentinel string (e.g. "_layer:42" or "_project:roads") tells
+      // /optimize/run which routing layer to use. use_road_network=true
+      // is the bare toggle; without the sentinel the solver wouldn't
+      // know which one of several routing-capable layers to pgRoute on.
+      params.set('use_road_network', 'true');
+      params.set('road_network',     roadLayerId);
+    }
     if (solver === 'ortools') {
       params.set('ot_time_limit_s',    String(ot.ot_time_limit_s));
       params.set('ot_first_solution',  ot.ot_first_solution);
@@ -1702,10 +1844,21 @@ function OptimizePanel({ project, push }) {
           (m.log_lines || []).forEach(appendLog);
         }
         setResult(m);
+        setRoadGeoms(null);
         appendLog(`done · run_id=${m.run_id || '?'}`);
         setRunning(false);
         es.close(); esRef.current = null;
         loadHistory();
+        // Fetch real road geometry for each team if pgRouting was used.
+        // Drops the dashed straight-line placeholders on the map and
+        // replaces them with the actual road polylines the solver
+        // walked. Best-effort — missing endpoint just leaves the
+        // straight-line fallback in place.
+        if (m.run_id && roadLayerId) {
+          _api(`/projects/${project.id}/optimize/runs/${encodeURIComponent(m.run_id)}/road-geometries`)
+            .then(setRoadGeoms)
+            .catch(() => { /* silent — RouteMap falls back to Haversine */ });
+        }
       } else if (m.type === 'error') {
         setStatus(`error: ${m.message || 'unknown'}`);
         appendLog(`ERROR: ${m.message || 'unknown'}`);
@@ -1760,7 +1913,11 @@ function OptimizePanel({ project, push }) {
             <select value={roadLayerId} onChange={(e) => setRoadLayerId(e.target.value)} disabled={running}
               style={{ width: '100%', padding: '8px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>
               <option value="">— none (straight-line Haversine) —</option>
-              {routingLayers.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+              {routingLayers.map(l => {
+                const ed = l.status && l.status.edges;
+                const meta = ed > 0 ? `${ed.toLocaleString()} edges` : '(needs build)';
+                return <option key={l.layer_id || l.sentinel} value={l.sentinel}>{l.name} · {meta}</option>;
+              })}
             </select>
           </div>
         </div>
@@ -1838,8 +1995,11 @@ function OptimizePanel({ project, push }) {
               : `${routes.length} route${routes.length === 1 ? '' : 's'}`
           }
           action={runId && (
-            <a href={`/projects/${project.id}/optimize/runs/${runId}/export.zip${(window.PlatformAuth && window.PlatformAuth.getToken && window.PlatformAuth.getToken()) ? '?token=' + encodeURIComponent(window.PlatformAuth.getToken()) : ''}`}
-               style={{ fontSize: 12, color: 'var(--brand-bim)', textDecoration: 'none', alignSelf: 'center' }}>Export .zip</a>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Button size="sm" variant="primary" leftIcon="⊞" onClick={openIn3DViewer}>Show in 3D viewer</Button>
+              <a href={`/projects/${project.id}/optimize/runs/${runId}/export.zip${(window.PlatformAuth && window.PlatformAuth.getToken && window.PlatformAuth.getToken()) ? '?token=' + encodeURIComponent(window.PlatformAuth.getToken()) : ''}`}
+                 style={{ fontSize: 12, color: 'var(--brand-bim)', textDecoration: 'none' }}>Export .zip</a>
+            </div>
           )}>
           {/* ── Stat tiles ── */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 14 }}>
@@ -1862,9 +2022,11 @@ function OptimizePanel({ project, push }) {
             {runId && <span className="micro" style={{ marginLeft: 'auto' }}>run_id: {runId.toString().slice(0, 8)}</span>}
           </div>
 
-          {/* ── 2D route map (Leaflet) ── */}
+          {/* ── 2D route map (Leaflet) — uses road-geometries when the
+              optimiser ran with pgRouting; falls back to dashed
+              straight lines otherwise. ── */}
           <div style={{ marginBottom: 14 }}>
-            <RouteMap routes={routes} />
+            <RouteMap routes={routes} roadGeoms={roadGeoms} />
           </div>
 
           {/* ── Per-team route cards ── */}
