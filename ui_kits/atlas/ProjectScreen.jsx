@@ -354,30 +354,34 @@ function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refres
       {loading ? (
         <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--brand-muted)' }}><Spinner /><div className="micro" style={{ marginTop: 14 }}>LOADING MODELS</div></div>
       ) : models.length === 0 ? (
-        <EmptyState icon="⊞"
-          title={(project.model_count || 0) > 0 ? `${project.model_count} model(s) attached` : 'No models in this project yet'}
-          description={(project.model_count || 0) > 0
-            ? 'The per-project model list endpoint is not wired yet — open the global Models page to see and manage them.'
-            : 'Upload an IFC above and the list will populate.'}
-          action={(project.model_count || 0) > 0
-            ? <Button size="sm" variant="secondary" onClick={() => { window.location.hash = 'models'; }}>Open Models</Button>
-            : undefined} />
+        <EmptyState icon="⊞" title="No models in this project yet"
+          description="Upload an IFC above and the list will populate as the worker builds its tileset." />
       ) : (() => {
         const cols = [
           { key: 'model_id', header: 'Model', sortable: true, render: r => <strong style={{ fontWeight: 600 }}>{r.model_id || r.name || '—'}</strong> },
-          { key: 'status',   header: 'Status', render: r => <Pill tone={_toneFor(r.status)} dot={_toneFor(r.status) !== 'neutral'}>{r.status || '—'}</Pill> },
+          { key: 'status',   header: 'Status', render: r => {
+            if (r.has_tileset) return <Pill tone="ok" dot>ready</Pill>;
+            if (r.status)      return <Pill tone={_toneFor(r.status)} dot={_toneFor(r.status) !== 'neutral'}>{r.status}</Pill>;
+            return <Pill tone="warn" dot>pending</Pill>;
+          } },
           { key: 'entities', header: 'Entities', align: 'end', render: r => <span style={{ fontFamily: 'var(--font-mono)' }}>{(r.entities ?? 0).toLocaleString()}</span> },
           { key: 'geometry_rows', header: 'Geometry', align: 'end', render: r => <span style={{ fontFamily: 'var(--font-mono)' }}>{(r.geometry_rows ?? 0).toLocaleString()}</span> },
+          { key: 'work_orders',   header: 'WOs', align: 'end', render: r => <span style={{ fontFamily: 'var(--font-mono)', color: (r.work_orders || 0) > 0 ? 'var(--brand-bim)' : 'var(--brand-faint)' }}>{r.work_orders ?? 0}</span> },
         ];
         const actions = r => (
           <React.Fragment>
-            <Button size="sm" variant="secondary" onClick={onOpenMap}>Open 3D</Button>
-            <Button size="sm" variant="ghost" onClick={() => push({ tone: 'info', title: `Inspecting ${r.model_id}` })}>Inspect</Button>
+            {r.has_tileset
+              ? <Button size="sm" variant="secondary" onClick={() => onOpenMap && onOpenMap(r)}>3D viewer</Button>
+              : <Button size="sm" variant="ghost" disabled>3D viewer</Button>}
+            {r.has_tileset && (
+              <a href={`#ar?model=${encodeURIComponent(r.model_id)}`} onClick={(e) => { e.preventDefault(); window.location.hash = `ar?model=${encodeURIComponent(r.model_id)}`; }}
+                 style={{ padding: '4px 10px', fontSize: 12, color: 'var(--brand-text)', textDecoration: 'none', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>AR/VR</a>
+            )}
           </React.Fragment>
         );
         return mobile
           ? <StackedCardTable columns={cols} rows={models} rowKey={r => r.model_id || r.id} actions={actions} />
-          : <DataTable columns={cols} rows={models} rowKey={r => r.model_id || r.id} caption={`${models.length} models`} actions={actions} />;
+          : <DataTable columns={cols} rows={models} rowKey={r => r.model_id || r.id} caption={`${models.length} model${models.length === 1 ? '' : 's'}`} actions={actions} />;
       })()}
     </div>
   );
@@ -1965,9 +1969,33 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
     if (!project || !project.id) return;
     setModels(s => ({ ...s, loading: true }));
     try {
-      const data = await _api(`/projects/${project.id}/ingest-status`);
-      setModels({ items: data.items || [], loading: false, error: null });
-    } catch (err) { setModels({ items: [], loading: false, error: err.message }); }
+      // Same shape the legacy /v0/project.html uses: GET /projects/{id}
+      // gives us the model_ids array; /models gives every model's stats.
+      // Cross-reference the two so this tab matches bim-gis.com.
+      // /ingest-status is then folded in as a non-blocking enrichment
+      // (status / progress for any model still being translated).
+      const [proj, all] = await Promise.all([
+        _api(`/projects/${project.id}`),
+        _api('/models'),
+      ]);
+      const modelIds = proj.model_ids || [];
+      const byId = new Map((all.models || []).map(m => [m.model_id, m]));
+      const rows = modelIds.map(mid => byId.get(mid) || {
+        model_id: mid, entities: 0, geometry_rows: 0, work_orders: 0, has_tileset: false,
+      });
+      // Best-effort overlay of live ingest-status progress.
+      try {
+        const ing = await _api(`/projects/${project.id}/ingest-status`);
+        const stageById = new Map((ing.items || []).map(it => [it.model_id, it]));
+        rows.forEach(r => {
+          const s = stageById.get(r.model_id);
+          if (s) Object.assign(r, { status: s.status, stage: s.stage, progress: s.progress });
+        });
+      } catch { /* polling endpoint is optional for the initial render */ }
+      setModels({ items: rows, loading: false, error: null });
+    } catch (err) {
+      setModels({ items: [], loading: false, error: err.message });
+    }
   }, [project && project.id]);
 
   const loadOverlays = React.useCallback(async () => {
