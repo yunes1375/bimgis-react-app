@@ -69,9 +69,13 @@ function StatTile({ label, value, hint }) {
 }
 
 function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
-  const [models, setModels]   = React.useState({ loading: true, error: null, items: [], allItems: [], scope: 'all' });
+  const [models, setModels]   = React.useState({ loading: true, error: null, items: [], allItems: [], scopeName: null });
   const [picked, setPicked]   = React.useState(null);
-  const [showAll, setShowAll] = React.useState(false);   // user-overrides project scope
+  const [projects, setProjects] = React.useState({ loading: true, items: [] });
+  // Filter dropdown: '' = all projects, otherwise project.id.
+  // Default to the project we arrived from (Models tab click); if AR was
+  // hit directly via #ar the field starts at "all projects".
+  const [filterPid, setFilterPid] = React.useState(project && project.id ? project.id : '');
   const [glbSize, setGlbSize] = React.useState(null);
   const [error, setError]     = React.useState(null);
   const [toasts, setToasts]   = React.useState([]);
@@ -84,9 +88,28 @@ function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
     setTimeout(() => setToasts(ts => ts.filter(x => x.id !== id)), 3600);
   };
 
-  // Load models; scope to project.model_ids when a project context is
-  // present (clicked AR/VR from inside a project's Models tab) unless
-  // the user overrode with "Show all models".
+  // Re-sync filterPid when the prop-passed project changes (e.g. the user
+  // navigated from a different project's row).
+  React.useEffect(() => {
+    if (project && project.id) setFilterPid(project.id);
+  }, [project && project.id]);
+
+  // Load every project the user can access (for the filter dropdown).
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await _api('/projects');
+        if (!cancelled) setProjects({ loading: false, items: data.projects || [] });
+      } catch {
+        if (!cancelled) setProjects({ loading: false, items: [] });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Load models; intersect with the picked project's model_ids when the
+  // filter is set, otherwise show every tileset-ready model.
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -95,33 +118,33 @@ function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
         if (cancelled) return;
         const allReady = (data.models || []).filter(m => m.has_tileset);
         let items = allReady;
-        let scope = 'all';
-        if (project && project.id && !showAll) {
+        let scopeName = null;
+        if (filterPid) {
           try {
-            const proj = await _api(`/projects/${project.id}`);
+            const proj = await _api(`/projects/${filterPid}`);
             const ids = new Set(proj.model_ids || []);
             items = allReady.filter(m => ids.has(m.model_id));
-            scope = 'project';
+            scopeName = proj.name || null;
           } catch { /* fall through to global list */ }
         }
         if (cancelled) return;
-        setModels({ loading: false, error: null, items, allItems: allReady, scope });
+        setModels({ loading: false, error: null, items, allItems: allReady, scopeName });
 
-        // Prefer the prop-passed modelId; fall back to the first item.
-        // Look it up across the FULL list so a deep-link to a model that
-        // happens to belong to a different project still resolves.
+        // Prefer the prop-passed modelId. Look it up across both the
+        // scoped list AND the full list so a deep-link to a model that
+        // doesn't belong to the current filter still resolves.
         if (modelId) {
           const hit = items.find(m => m.model_id === modelId) || allReady.find(m => m.model_id === modelId);
           if (hit) { setPicked(hit); return; }
         }
         setPicked(prev => prev || items[0] || null);
       } catch (err) {
-        if (!cancelled) setModels({ loading: false, error: err.message, items: [], allItems: [], scope: 'all' });
+        if (!cancelled) setModels({ loading: false, error: err.message, items: [], allItems: [], scopeName: null });
       }
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project && project.id, showAll, modelId]);
+  }, [filterPid, modelId]);
 
   // Fetch GLB size via HEAD whenever the picked model changes.
   React.useEffect(() => {
@@ -202,14 +225,14 @@ function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
               {models.loading ? <Spinner size="lg" /> : (
                 <React.Fragment>
                   <div className="micro">
-                    {models.scope === 'project' && project
-                      ? `NO TILESET-READY MODELS IN ${project.name.toUpperCase()}`
+                    {filterPid && models.scopeName
+                      ? `NO TILESET-READY MODELS IN ${models.scopeName.toUpperCase()}`
                       : 'NO MODELS WITH TILESETS'}
                   </div>
                   <p style={{ fontSize: 13, maxWidth: 320, textAlign: 'center', margin: 0 }}>
                     {models.error || (
-                      models.scope === 'project' && project && models.allItems.length > 0
-                        ? <>This project has no tileset yet. {models.allItems.length} model{models.allItems.length === 1 ? '' : 's'} elsewhere — <button onClick={() => setShowAll(true)} style={{ background: 'none', border: 'none', color: 'var(--brand-bim)', textDecoration: 'underline', cursor: 'pointer', padding: 0, font: 'inherit' }}>show all</button>?</>
+                      filterPid && models.allItems.length > 0
+                        ? <>{models.allItems.length} model{models.allItems.length === 1 ? '' : 's'} elsewhere — <button onClick={() => setFilterPid('')} style={{ background: 'none', border: 'none', color: 'var(--brand-bim)', textDecoration: 'underline', cursor: 'pointer', padding: 0, font: 'inherit' }}>switch to All projects</button>?</>
                         : 'Upload an IFC from a project page and let the worker build its tileset, then come back.'
                     )}
                   </p>
@@ -278,16 +301,27 @@ function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
           {/* Model picker */}
           <Card title="Pick a model" dense
             subtitle={models.loading ? 'loading…' :
-              models.scope === 'project' && project
-                ? `${models.items.length} of ${project.name} · ${models.allItems.length - models.items.length} more globally`
-                : `${models.items.length} model${models.items.length === 1 ? '' : 's'} with tilesets`}
+              filterPid && models.scopeName
+                ? `${models.items.length} of ${models.scopeName} · ${models.allItems.length - models.items.length} elsewhere`
+                : `${models.items.length} model${models.items.length === 1 ? '' : 's'} across ${projects.items.length || 'all'} project${projects.items.length === 1 ? '' : 's'}`}
             action={
-              project && project.id && (
-                <Button size="sm" variant="ghost"
-                  onClick={() => setShowAll(s => !s)}
-                  title={showAll ? `Filter back to ${project.name}` : 'List every model with a tileset across all projects'}>
-                  {showAll ? `↩ Filter to ${project.name}` : 'Show all models'}
-                </Button>
+              projects.items.length > 0 && (
+                <select value={filterPid}
+                  onChange={(e) => setFilterPid(e.target.value)}
+                  title="Filter the picker to a project you have access to"
+                  style={{
+                    padding: '4px 8px', maxWidth: 180,
+                    background: 'var(--brand-bg-2)', color: 'var(--brand-text)',
+                    border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)',
+                    fontFamily: 'var(--font-mono)', fontSize: 11,
+                  }}>
+                  <option value="">All projects ({projects.items.length})</option>
+                  {projects.items.map(p => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}{p.model_count != null ? ` · ${p.model_count}` : ''}
+                    </option>
+                  ))}
+                </select>
               )
             }>
             {models.loading ? (
