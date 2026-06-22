@@ -1347,9 +1347,14 @@ function OrdersPanel({ project, push, onOpenMap }) {
   const byPriority = (stats && stats.by_priority) || {};
 
   const cols = [
-    { key: 'number', header: '#', render: r => <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.work_order_number || r.id.slice(0, 8)}</span> },
+    { key: 'number', header: '#', render: r => (
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'nowrap' }}>{r.work_order_number || r.id.slice(0, 8)}</span>
+    ) },
     { key: 'title',  header: 'Title', render: r => (
-      <div>
+      // Titles can be a full sentence ("Inspect HVAC unit on the roof
+      // before the next maintenance cycle") — let them wrap onto as
+      // many lines as they need so the table never has to side-scroll.
+      <div style={{ maxWidth: 260, whiteSpace: 'normal', overflowWrap: 'anywhere', wordBreak: 'break-word', lineHeight: 1.35 }}>
         <strong style={{ fontWeight: 600 }}>{r.title}</strong>
         {r.assigned_to && <div className="micro" style={{ marginTop: 2 }}>{r.assigned_to}</div>}
       </div>
@@ -1357,7 +1362,14 @@ function OrdersPanel({ project, push, onOpenMap }) {
     { key: 'model',  header: 'Model', render: r => {
       const mid = r.model_id || '';
       const short = mid.length > 14 ? mid.slice(0, 12) + '…' : mid;
-      return <span title={mid} style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--brand-muted)' }}>{short}</span>;
+      return (
+        <span title={mid} style={{
+          display: 'inline-block', maxWidth: 100,
+          fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--brand-muted)',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          verticalAlign: 'top',
+        }}>{short}</span>
+      );
     } },
     { key: 'flags',  header: 'State', render: r => (
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center', maxWidth: 220 }}>
@@ -1464,12 +1476,19 @@ function OrdersPanel({ project, push, onOpenMap }) {
         /* Tighten the WO data table so 6 cols + actions fit ≥ 1100 px.
            DS DataTable still controls structure; we only override
            horizontal padding + text wrap of its <th>/<td> cells. */
+        .bp-wo-table { width: 100%; overflow: hidden; }
         .bp-wo-table table { table-layout: auto; width: 100%; }
         .bp-wo-table th, .bp-wo-table td {
           padding-inline: 8px !important;
-          word-break: break-word; vertical-align: top;
+          white-space: normal !important;
+          overflow-wrap: anywhere !important;
+          word-break: break-word !important;
+          vertical-align: top !important;
         }
+        /* Action buttons stay on one line each but the cell wraps them
+           onto 2 rows when narrow. */
         .bp-wo-table td button { white-space: nowrap; }
+        .bp-wo-table td:last-child { white-space: normal; }
       `}</style>
     </div>
   );
