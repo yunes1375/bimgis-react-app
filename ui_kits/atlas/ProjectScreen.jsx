@@ -738,11 +738,54 @@ function _IngestProgressCell({ row }) {
   );
 }
 
-function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refresh }) {
+function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refresh, who }) {
   const [pollMap, setPollMap] = React.useState({});           // model_id → ingest item
   const [editor, setEditor]   = React.useState(null);          // {model_id, firstTime} or null
+  const [busyId, setBusyId]   = React.useState(null);          // model_id currently being deleted
   const autoOpenedRef         = React.useRef(new Set());
   const pollTimerRef          = React.useRef(null);
+
+  // Delete is admin-only or the project owner. The server enforces this
+  // too — the gate here is just UX so non-owners don't see a button that
+  // they can't use anyway.
+  const canDestroy = !!(who && (who.is_admin ||
+    (project && who.email && who.email === project.owner_email)));
+
+  async function deleteModel(row) {
+    const confirmed = window.confirm(
+      `Permanently delete model "${row.model_id}"?\n\n` +
+      `This wipes:\n` +
+      `  • every Neo4j entity, work order and metadata node\n` +
+      `  • every spatial row, change-log entry and GIS layer\n` +
+      `  • the 3D tileset on disk\n` +
+      `  • the uploaded IFC source file (if any)\n\n` +
+      `This cannot be undone.`
+    );
+    if (!confirmed) return;
+    setBusyId(row.model_id);
+    try {
+      const data = await _api(`/projects/${project.id}/models/${encodeURIComponent(row.model_id)}`, { method: 'DELETE' });
+      const s = (data && data.stats) || {};
+      const summary = [
+        s.graph_entity_deleted != null && `${s.graph_entity_deleted} entities`,
+        s.pg_ifc_geometry      != null && `${s.pg_ifc_geometry} geom rows`,
+        s.tileset_removed                 ? '✓ tileset' : null,
+        s.source_removed                  ? '✓ source IFC' : null,
+      ].filter(Boolean).join(' · ') || 'all records removed';
+      push({ tone: 'success', title: `Deleted ${row.model_id}`, description: summary });
+      // Forget any auto-open flag for this id so a future model with the
+      // same id wouldn't be skipped.
+      autoOpenedRef.current.delete(row.model_id);
+      // Drop any stale poll-map entry immediately so the row vanishes
+      // before the silent refresh round-trip returns.
+      setPollMap(p => { const next = { ...p }; delete next[row.model_id]; return next; });
+      refresh({ silent: true });
+    } catch (err) {
+      push({ tone: 'error', title: 'Delete failed', description: err.message });
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   // Stitch poll data into the rows the parent passed in. Each poll-item
   // wins over the static row so a fresh stage / percent / error bubbles up
@@ -826,18 +869,35 @@ function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refres
           { key: 'geometry_rows', header: 'Geometry', align: 'end', render: r => <span style={{ fontFamily: 'var(--font-mono)' }}>{(r.geometry_rows ?? 0).toLocaleString()}</span> },
           { key: 'work_orders',   header: 'WOs', align: 'end', render: r => <span style={{ fontFamily: 'var(--font-mono)', color: (r.work_orders || 0) > 0 ? 'var(--brand-bim)' : 'var(--brand-faint)' }}>{r.work_orders ?? 0}</span> },
         ];
-        const actions = r => (
-          <React.Fragment>
-            {r.has_tileset
-              ? <Button size="sm" variant="secondary" onClick={() => onOpenMap && onOpenMap(r)}>3D viewer</Button>
-              : <Button size="sm" variant="ghost" disabled>3D viewer</Button>}
-            {r.has_tileset && (
-              <a href={`#ar?model=${encodeURIComponent(r.model_id)}`} onClick={(e) => { e.preventDefault(); window.location.hash = `ar?model=${encodeURIComponent(r.model_id)}`; }}
-                 style={{ padding: '4px 10px', fontSize: 12, color: 'var(--brand-text)', textDecoration: 'none', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>AR/VR</a>
-            )}
-            {(r.stage === 'awaiting_placement' || r.has_tileset) && adjustLink(r)}
-          </React.Fragment>
-        );
+        const actions = r => {
+          const busy = busyId === r.model_id;
+          return (
+            <React.Fragment>
+              {r.has_tileset
+                ? <Button size="sm" variant="secondary" disabled={busy} onClick={() => onOpenMap && onOpenMap(r)}>3D viewer</Button>
+                : <Button size="sm" variant="ghost" disabled>3D viewer</Button>}
+              {r.has_tileset && (
+                <a href={`#ar?model=${encodeURIComponent(r.model_id)}`} onClick={(e) => { e.preventDefault(); window.location.hash = `ar?model=${encodeURIComponent(r.model_id)}`; }}
+                   style={{ padding: '4px 10px', fontSize: 12, color: 'var(--brand-text)', textDecoration: 'none', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>AR/VR</a>
+              )}
+              {(r.stage === 'awaiting_placement' || r.has_tileset) && adjustLink(r)}
+              {canDestroy && (
+                <button type="button" disabled={busy} onClick={() => deleteModel(r)}
+                  title="Permanently delete this model and every record + file tied to it"
+                  style={{
+                    padding: '4px 10px', fontSize: 12, fontFamily: 'inherit', cursor: busy ? 'progress' : 'pointer',
+                    color: '#ff9a9a', background: 'transparent',
+                    border: '1px solid rgba(230,120,120,0.45)', borderRadius: 'var(--r-md)',
+                    opacity: busy ? 0.6 : 1, transition: 'background 120ms, border-color 120ms',
+                  }}
+                  onMouseEnter={(e) => { if (!busy) e.currentTarget.style.background = 'rgba(230,120,120,0.12)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}>
+                  {busy ? 'Deleting…' : '× Delete'}
+                </button>
+              )}
+            </React.Fragment>
+          );
+        };
         return mobile
           ? <StackedCardTable columns={cols} rows={rows} rowKey={r => r.model_id || r.id} actions={actions} />
           : <DataTable columns={cols} rows={rows} rowKey={r => r.model_id || r.id} caption={`${rows.length} model${rows.length === 1 ? '' : 's'}${inflight ? ' · polling' : ''}`} actions={actions} />;
@@ -2529,7 +2589,7 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
         </div>
 
         {tab === 'overview'  && <OverviewPanel project={project} models={models.items} modelsLoading={models.loading} overlays={overlays.items} overlaysLoading={overlays.loading} />}
-        {tab === 'models'    && <ModelsPanel mobile={mobile} models={models.items} loading={models.loading} project={project} onOpenMap={onOpenMap} push={push} refresh={loadModels} />}
+        {tab === 'models'    && <ModelsPanel mobile={mobile} models={models.items} loading={models.loading} project={project} onOpenMap={onOpenMap} push={push} refresh={loadModels} who={who} />}
         {tab === 'teams'     && <TeamsPanel project={project} push={push} />}
         {tab === 'orders'    && <OrdersPanel project={project} push={push} onOpenMap={onOpenMap} />}
         {tab === 'optimize'  && <OptimizePanel project={project} push={push} />}
