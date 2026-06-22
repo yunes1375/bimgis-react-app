@@ -785,7 +785,9 @@ function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refres
         }
       }
       setPollMap(next);
-      if (justFinished) setTimeout(refresh, 600);
+      // Silent refresh on "ready" so has_tileset + entity / geometry counts
+      // flip in place — no spinner blanking the table.
+      if (justFinished) setTimeout(() => refresh({ silent: true }), 600);
       if (stillInflight) pollTimerRef.current = setTimeout(pollOnce, 2500);
     } catch {
       pollTimerRef.current = setTimeout(pollOnce, 5000);
@@ -810,7 +812,7 @@ function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refres
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <IfcUploader project={project} onUploaded={() => { refresh(); pollOnce(); }} push={push} />
+      <IfcUploader project={project} onUploaded={() => { refresh({ silent: true }); pollOnce(); }} push={push} />
       {loading ? (
         <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--brand-muted)' }}><Spinner /><div className="micro" style={{ marginTop: 14 }}>LOADING MODELS</div></div>
       ) : rows.length === 0 ? (
@@ -846,7 +848,7 @@ function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refres
         modelId={editor && editor.model_id}
         projectId={project.id}
         firstTime={!!(editor && editor.firstTime)}
-        onClose={() => { setEditor(null); refresh(); pollOnce(); }}
+        onClose={() => { setEditor(null); pollOnce(); /* poll will trigger a silent refresh when stage flips */ }}
         push={push} />
     </div>
   );
@@ -2430,15 +2432,21 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
     setTimeout(() => setToasts(ts => ts.filter(x => x.id !== id)), 4200);
   };
 
-  const loadModels = React.useCallback(async () => {
+  const loadModels = React.useCallback(async (opts) => {
     if (!project || !project.id) return;
-    setModels(s => ({ ...s, loading: true }));
+    const silent = !!(opts && opts.silent);
+    // Only the initial mount toggles loading. Silent refreshes keep the
+    // current table painted so the user doesn't see a spinner / flicker
+    // every time an upload finishes, the editor closes, or a stage flips
+    // to ready (those are common enough during a fresh upload to cause
+    // multiple back-to-back refreshes otherwise).
+    if (!silent) setModels(s => ({ ...s, loading: true }));
     try {
       // Same shape the legacy /v0/project.html uses: GET /projects/{id}
       // gives us the model_ids array; /models gives every model's stats.
-      // Cross-reference the two so this tab matches bim-gis.com.
-      // /ingest-status is then folded in as a non-blocking enrichment
-      // (status / progress for any model still being translated).
+      // We deliberately DON'T fold in /ingest-status here — the poller
+      // owns that data via pollMap (see ModelsPanel), and re-fetching it
+      // on every refresh just multiplies network round-trips.
       const [proj, all] = await Promise.all([
         _api(`/projects/${project.id}`),
         _api('/models'),
@@ -2448,18 +2456,11 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
       const rows = modelIds.map(mid => byId.get(mid) || {
         model_id: mid, entities: 0, geometry_rows: 0, work_orders: 0, has_tileset: false,
       });
-      // Best-effort overlay of live ingest-status progress.
-      try {
-        const ing = await _api(`/projects/${project.id}/ingest-status`);
-        const stageById = new Map((ing.items || []).map(it => [it.model_id, it]));
-        rows.forEach(r => {
-          const s = stageById.get(r.model_id);
-          if (s) Object.assign(r, { status: s.status, stage: s.stage, progress: s.progress });
-        });
-      } catch { /* polling endpoint is optional for the initial render */ }
       setModels({ items: rows, loading: false, error: null });
     } catch (err) {
-      setModels({ items: [], loading: false, error: err.message });
+      // Keep prior items on a refresh error so we don't blank the table
+      // because of a transient network blip.
+      setModels(s => ({ items: silent ? s.items : [], loading: false, error: err.message }));
     }
   }, [project && project.id]);
 
