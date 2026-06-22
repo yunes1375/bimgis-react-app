@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="BIM·GIS Platform">
+  <title>BIM·GIS Platform</title>
+  <!-- BG monogram: B in BIM teal, G in GIS orange, sharing the centre stem. -->
+  <text x="6"  y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
+        font-size="84" font-weight="700" fill="#36e0d4">B</text>
+  <text x="42" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
+        font-size="84" font-weight="700" fill="#ff9a52" opacity="0.94">G</text>
+</svg>
