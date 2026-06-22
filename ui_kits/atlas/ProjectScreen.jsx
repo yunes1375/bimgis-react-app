@@ -64,6 +64,29 @@ function _fmtArrival(s) {
 function _teamColor(i) { return `hsl(${(i * 137.5) % 360}, 60%, 60%)`; }
 const _PRIO_DOT = { urgent: '#e8a060', high: '#fec060', normal: '#6a9be8', low: '#7a8aa8' };
 
+// ─── Placement-editor math (mirrors legacy main.js / project.html) ───────
+// Convert a local model-space (x east-m, y north-m) point into geographic
+// coordinates given the model's anchor + heading. The flat-earth tangent
+// approximation is fine for building-scale footprints (under a few km).
+const _R_EARTH = 6378137;  // metres
+function _localToLatLon(state, x, y) {
+  const rad = state.heading_deg * Math.PI / 180;
+  const cos = Math.cos(rad), sin = Math.sin(rad);
+  // Heading rotates clockwise from north: forward direction (x_local=0,
+  // y_local=+1) faces along the heading vector.
+  const east  =  x * cos + y * sin;
+  const north = -x * sin + y * cos;
+  const dLat = (north / _R_EARTH) * 180 / Math.PI;
+  const dLon = (east  / (_R_EARTH * Math.cos(state.lat * Math.PI / 180))) * 180 / Math.PI;
+  return [state.lat + dLat, state.lon + dLon];
+}
+function _bearingFromCentre(latlng, state) {
+  const dLat = (latlng.lat - state.lat) * Math.PI / 180;
+  const dLon = (latlng.lng - state.lon) * Math.PI / 180 * Math.cos(state.lat * Math.PI / 180);
+  let deg = Math.atan2(dLon, dLat) * 180 / Math.PI;   // north = 0, east = 90
+  return ((deg % 360) + 360) % 360;
+}
+
 // ─── Leaflet helpers ─────────────────────────────────────────────────────
 // Leaflet is loaded once in index.html (window.L). These two helpers wrap
 // it for use from React effects — we still talk to Leaflet imperatively
@@ -276,6 +299,345 @@ function OverviewPanel({ project, models, modelsLoading, overlays, overlaysLoadi
   );
 }
 
+// ─── Placement editor — Leaflet modal mirrors legacy ProposGeoEditor ─────
+// Footprint polygon from /tiles/{id}/footprint, draggable centre marker,
+// draggable rotation handle, basemap selector, nudge buttons, GIS overlays
+// from /projects/{id}/gis-layers. Save calls confirm-placement (first
+// time, kicks heavy ingest) or PATCH /placement (post-build adjust).
+function PlacementEditor({ open, modelId, projectId, firstTime, onClose, push }) {
+  const mapDivRef = React.useRef(null);
+  const mapRef    = React.useRef(null);
+  const initial   = React.useRef({ lat: 0, lon: 0, heading_deg: 0, height_m: 0 });
+  const stateRef  = React.useRef({ ...initial.current });
+  const ringRef   = React.useRef(null);
+  const polyRef   = React.useRef(null);
+  const cmRef     = React.useRef(null);   // centre marker
+  const hmRef     = React.useRef(null);   // handle marker
+  const hlRef     = React.useRef(null);   // handle line
+  const tileRef   = React.useRef(null);
+  const overlayLayersRef = React.useRef(new Map());
+  const handleRRef = React.useRef(50);
+
+  const [phase, setPhase] = React.useState('loading');  // loading | ready | error | saving
+  const [status, setStatus] = React.useState('');
+  const [lat, setLat] = React.useState('');
+  const [lon, setLon] = React.useState('');
+  const [heading, setHeading] = React.useState('');
+  const [basemap, setBasemap] = React.useState('carto-dark');
+  const [step, setStep] = React.useState(1);
+  const [overlays, setOverlays] = React.useState([]);   // project gis-layers
+  const [activeOv, setActiveOv] = React.useState({});   // layer_id → bool
+
+  // Tear down map + Leaflet state every time the dialog closes.
+  React.useEffect(() => {
+    if (!open) {
+      if (mapRef.current) { try { mapRef.current.remove(); } catch {} mapRef.current = null; }
+      overlayLayersRef.current.clear();
+      setPhase('loading'); setStatus(''); setOverlays([]); setActiveOv({});
+    }
+  }, [open]);
+
+  // Load footprint + overlay list as soon as the dialog opens.
+  React.useEffect(() => {
+    if (!open || !modelId || !projectId || !window.L) return;
+    let cancelled = false;
+    setPhase('loading'); setStatus('loading footprint…');
+    (async () => {
+      try {
+        const data = await _api(`/tiles/${encodeURIComponent(modelId)}/footprint`);
+        if (cancelled) return;
+        if (!data.footprint_local || !data.footprint_local.coordinates) {
+          setPhase('error'); setStatus('no footprint cached — regenerate the tileset first.');
+          return;
+        }
+        initial.current = {
+          lat: data.lat, lon: data.lon,
+          heading_deg: data.heading_deg || 0,
+          height_m:    data.height_m    || 0,
+        };
+        stateRef.current = { ...initial.current };
+        const ring = data.footprint_local.coordinates[0];
+        ringRef.current = ring;
+        let maxR = 5;
+        for (const [x, y] of ring) {
+          const r = Math.hypot(x, y);
+          if (r > maxR) maxR = r;
+        }
+        handleRRef.current = Math.min(Math.max(maxR * 1.2, 8), 250);
+        setLat(stateRef.current.lat.toFixed(6));
+        setLon(stateRef.current.lon.toFixed(6));
+        setHeading(stateRef.current.heading_deg.toFixed(1));
+        setPhase('ready'); setStatus('');
+
+        // Mount Leaflet *after* React paints the dialog.
+        setTimeout(() => {
+          if (cancelled || !mapDivRef.current) return;
+          mountMap();
+          // GIS overlays list (best-effort).
+          _api(`/projects/${projectId}/gis-layers`).then(d => {
+            if (!cancelled) setOverlays(d.layers || d.items || []);
+          }).catch(() => {});
+        }, 50);
+      } catch (err) {
+        if (!cancelled) { setPhase('error'); setStatus('failed to load footprint: ' + err.message); }
+      }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, modelId, projectId]);
+
+  function applyBasemap(name) {
+    const map = mapRef.current; if (!map || !window.L) return;
+    const defs = {
+      'carto-dark':  { url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',  attribution: '© OSM · © CARTO', subdomains: 'abcd', maxZoom: 22 },
+      'carto-light': { url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', attribution: '© OSM · © CARTO', subdomains: 'abcd', maxZoom: 22 },
+      'osm':         { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',                 attribution: '© OSM contributors',                   maxZoom: 19 },
+      'esri-sat':    { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attribution: 'Tiles © Esri', maxZoom: 19 },
+    };
+    if (tileRef.current) { map.removeLayer(tileRef.current); tileRef.current = null; }
+    const def = defs[name]; if (!def) return;
+    tileRef.current = window.L.tileLayer(def.url, def).addTo(map);
+    tileRef.current.bringToBack();
+  }
+
+  function mountMap() {
+    if (!window.L || !mapDivRef.current || mapRef.current) return;
+    const L = window.L;
+    const st = stateRef.current;
+    const ring = ringRef.current || [];
+    const map = L.map(mapDivRef.current, { zoomControl: true, attributionControl: true }).setView([st.lat, st.lon], 19);
+    mapRef.current = map;
+    applyBasemap(basemap);
+
+    polyRef.current = L.polygon(ring.map(([x, y]) => _localToLatLon(st, x, y)), {
+      color: '#f5a042', weight: 2, fillColor: '#f5a042', fillOpacity: 0.18,
+    }).addTo(map);
+
+    const centreIcon = L.divIcon({
+      className: 'plc-centre',
+      html: '<div style="width:16px;height:16px;border:2px solid #5cc4ff;background:rgba(92,196,255,0.4);border-radius:50%;box-shadow:0 0 6px rgba(92,196,255,0.6);"></div>',
+      iconSize: [16, 16], iconAnchor: [8, 8],
+    });
+    cmRef.current = L.marker([st.lat, st.lon], { draggable: true, icon: centreIcon, title: 'drag to reposition' }).addTo(map);
+
+    const handleIcon = L.divIcon({
+      className: 'plc-handle',
+      html: '<div style="width:14px;height:14px;border:2px solid #f5a042;background:rgba(245,160,66,0.6);border-radius:50%;box-shadow:0 0 4px rgba(245,160,66,0.6);"></div>',
+      iconSize: [14, 14], iconAnchor: [7, 7],
+    });
+    const hp0 = _localToLatLon(st, 0, handleRRef.current);
+    hmRef.current = L.marker(hp0, { draggable: true, icon: handleIcon, title: 'drag to rotate' }).addTo(map);
+    hlRef.current = L.polyline([[st.lat, st.lon], hp0], { color: '#f5a042', weight: 1.5, dashArray: '4,4', opacity: 0.7 }).addTo(map);
+
+    cmRef.current.on('drag', () => {
+      const ll = cmRef.current.getLatLng();
+      stateRef.current.lat = ll.lat;
+      stateRef.current.lon = ll.lng;
+      redraw();
+    });
+    hmRef.current.on('drag', () => {
+      stateRef.current.heading_deg = _bearingFromCentre(hmRef.current.getLatLng(), stateRef.current);
+      // Snap handle back to canonical distance so its radius stays fixed.
+      const hp = _localToLatLon(stateRef.current, 0, handleRRef.current);
+      hmRef.current.setLatLng(hp);
+      polyRef.current.setLatLngs(ringRef.current.map(([x, y]) => _localToLatLon(stateRef.current, x, y)));
+      hlRef.current.setLatLngs([[stateRef.current.lat, stateRef.current.lon], hp]);
+      setLat(stateRef.current.lat.toFixed(6));
+      setLon(stateRef.current.lon.toFixed(6));
+      setHeading(stateRef.current.heading_deg.toFixed(1));
+    });
+
+    setTimeout(() => map.invalidateSize(), 60);
+  }
+
+  function redraw() {
+    const st = stateRef.current;
+    if (polyRef.current && ringRef.current) {
+      polyRef.current.setLatLngs(ringRef.current.map(([x, y]) => _localToLatLon(st, x, y)));
+    }
+    const hp = _localToLatLon(st, 0, handleRRef.current);
+    if (hmRef.current) hmRef.current.setLatLng(hp);
+    if (hlRef.current) hlRef.current.setLatLngs([[st.lat, st.lon], hp]);
+    setLat(st.lat.toFixed(6));
+    setLon(st.lon.toFixed(6));
+    setHeading(st.heading_deg.toFixed(1));
+  }
+
+  function onLatInput(v) {
+    setLat(v);
+    const n = parseFloat(v);
+    if (Number.isFinite(n)) { stateRef.current.lat = n; if (cmRef.current) cmRef.current.setLatLng([n, stateRef.current.lon]); redraw(); }
+  }
+  function onLonInput(v) {
+    setLon(v);
+    const n = parseFloat(v);
+    if (Number.isFinite(n)) { stateRef.current.lon = n; if (cmRef.current) cmRef.current.setLatLng([stateRef.current.lat, n]); redraw(); }
+  }
+  function onHeadInput(v) {
+    setHeading(v);
+    const n = parseFloat(v);
+    if (Number.isFinite(n)) { stateRef.current.heading_deg = ((n % 360) + 360) % 360; redraw(); }
+  }
+
+  function nudge(dxEast, dyNorth) {
+    const st = stateRef.current;
+    const dLat = (dyNorth / _R_EARTH) * 180 / Math.PI;
+    const dLon = (dxEast  / (_R_EARTH * Math.cos(st.lat * Math.PI / 180))) * 180 / Math.PI;
+    st.lat += dLat; st.lon += dLon;
+    if (cmRef.current) cmRef.current.setLatLng([st.lat, st.lon]);
+    redraw();
+  }
+
+  function reset() {
+    Object.assign(stateRef.current, initial.current);
+    if (cmRef.current) cmRef.current.setLatLng([stateRef.current.lat, stateRef.current.lon]);
+    redraw();
+    if (mapRef.current) mapRef.current.setView([stateRef.current.lat, stateRef.current.lon], mapRef.current.getZoom());
+    setStatus('reset to last saved values');
+  }
+
+  async function toggleOverlay(layer, on) {
+    const map = mapRef.current; if (!map || !window.L) return;
+    setActiveOv(s => ({ ...s, [layer.id]: on }));
+    if (on) {
+      try {
+        const r = await fetch(`/projects/${projectId}/gis-layers/${encodeURIComponent(layer.id)}/export`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const geo = await r.json();
+        const palette = ['#f59e0b','#3b82f6','#10b981','#ef4444','#a855f7','#ec4899','#06b6d4','#84cc16'];
+        const colour = palette[Math.abs((layer.id || 0).toString().split('').reduce((a, c) => a + c.charCodeAt(0), 0)) % palette.length];
+        const gj = window.L.geoJSON(geo, {
+          style: { color: colour, weight: 1.5, fillColor: colour, fillOpacity: 0.18 },
+          pointToLayer: (_f, ll) => window.L.circleMarker(ll, { radius: 4, color: colour, fillColor: colour, fillOpacity: 0.8, weight: 1 }),
+        }).addTo(map);
+        overlayLayersRef.current.set(layer.id, gj);
+      } catch (err) {
+        push && push({ tone: 'error', title: 'Overlay failed', description: err.message });
+        setActiveOv(s => ({ ...s, [layer.id]: false }));
+      }
+    } else {
+      const gj = overlayLayersRef.current.get(layer.id);
+      if (gj) { map.removeLayer(gj); overlayLayersRef.current.delete(layer.id); }
+    }
+  }
+
+  async function save() {
+    const body = {
+      lat: stateRef.current.lat, lon: stateRef.current.lon,
+      heading_deg: stateRef.current.heading_deg, height_m: stateRef.current.height_m,
+    };
+    setPhase('saving');
+    setStatus(firstTime ? 'confirming + starting ingest…' : 'saving…');
+    try {
+      if (firstTime) {
+        await _api(`/tiles/${encodeURIComponent(modelId)}/confirm-placement`, { method: 'POST', body: JSON.stringify(body) });
+        push && push({ tone: 'success', title: `Placement confirmed for ${modelId}`, description: 'Heavy ingest started — watch the row below.' });
+      } else {
+        await _api(`/tiles/${encodeURIComponent(modelId)}/placement`, { method: 'PATCH', body: JSON.stringify(body) });
+        push && push({ tone: 'success', title: `Placement saved for ${modelId}` });
+      }
+      Object.assign(initial.current, stateRef.current);
+      setStatus(firstTime ? 'confirmed.' : 'saved.');
+      setTimeout(() => onClose(), 500);
+    } catch (e) {
+      setPhase('ready');
+      setStatus((firstTime ? 'confirm failed: ' : 'save failed: ') + e.message);
+    }
+  }
+
+  if (!open) return null;
+
+  return (
+    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(2px)',
+      zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+    }}>
+      <div style={{
+        background: 'var(--brand-surface)', border: '1px solid var(--brand-line-strong)',
+        borderRadius: 'var(--r-lg)', width: 'min(960px, 100%)', maxHeight: '92vh', overflow: 'auto',
+        boxShadow: 'var(--shadow-card)', display: 'flex', flexDirection: 'column',
+      }} role="dialog" aria-modal="true">
+        <header style={{ padding: '14px 16px', borderBottom: '1px solid var(--brand-line)', display: 'flex', alignItems: 'center', gap: 10, position: 'sticky', top: 0, background: 'var(--brand-surface)', zIndex: 2 }}>
+          <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontSize: 'var(--fs-h3)', fontWeight: 600, flex: 1 }}>
+            {firstTime ? 'Confirm placement' : 'Adjust placement'} · <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--brand-muted)' }}>{modelId}</span>
+          </h3>
+          <button onClick={onClose} aria-label="Close" style={{ background: 'transparent', border: '1px solid var(--brand-line-strong)', color: 'var(--brand-muted)', borderRadius: 'var(--r-md)', width: 28, height: 28, fontSize: 18, cursor: 'pointer' }}>×</button>
+        </header>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(220px, 1fr)', gap: 12, padding: 12, minHeight: 460 }}>
+          {/* Map */}
+          <div style={{ position: 'relative', borderRadius: 'var(--r-md)', overflow: 'hidden', background: '#1c222d', minHeight: 460 }}>
+            {phase === 'loading' && <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--brand-muted)' }}><Spinner /></div>}
+            {phase === 'error'   && <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--brand-error, #f88)', padding: 20, textAlign: 'center', fontSize: 13 }}>{status}</div>}
+            <div ref={mapDivRef} style={{ width: '100%', height: '100%', minHeight: 460 }} />
+          </div>
+
+          {/* Right rail */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
+            <div>
+              <label className="micro" style={{ display: 'block', marginBottom: 4 }}>Basemap</label>
+              <select value={basemap} onChange={(e) => { setBasemap(e.target.value); applyBasemap(e.target.value); }}
+                style={{ width: '100%', padding: '6px 10px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>
+                <option value="carto-dark">Carto · dark</option>
+                <option value="carto-light">Carto · light</option>
+                <option value="osm">OpenStreetMap</option>
+                <option value="esri-sat">Esri · satellite</option>
+                <option value="none">None</option>
+              </select>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+              <Input label="Lat" value={lat} onChange={(e) => onLatInput(e.target.value)} type="number" />
+              <Input label="Lon" value={lon} onChange={(e) => onLonInput(e.target.value)} type="number" />
+            </div>
+            <Input label="Heading °" value={heading} onChange={(e) => onHeadInput(e.target.value)} type="number" />
+
+            <div>
+              <label className="micro" style={{ display: 'block', marginBottom: 4 }}>Nudge (m) · step <input type="number" step="0.5" min="0.1" value={step} onChange={(e) => setStep(parseFloat(e.target.value) || 1)} style={{ width: 60, marginLeft: 6, padding: '2px 6px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-sm)', fontSize: 11 }} /></label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4 }}>
+                <span />
+                <Button size="sm" variant="ghost" onClick={() => nudge(0, +step)}>↑ N</Button>
+                <span />
+                <Button size="sm" variant="ghost" onClick={() => nudge(-step, 0)}>← W</Button>
+                <Button size="sm" variant="ghost" onClick={reset} title="Reset to last saved values">↺</Button>
+                <Button size="sm" variant="ghost" onClick={() => nudge(+step, 0)}>E →</Button>
+                <span />
+                <Button size="sm" variant="ghost" onClick={() => nudge(0, -step)}>↓ S</Button>
+                <span />
+              </div>
+            </div>
+
+            {overlays.length > 0 && (
+              <div>
+                <label className="micro" style={{ display: 'block', marginBottom: 4 }}>GIS overlays</label>
+                <div style={{ maxHeight: 140, overflow: 'auto', border: '1px solid var(--brand-line)', borderRadius: 'var(--r-md)', padding: 6 }}>
+                  {overlays.map(l => (
+                    <label key={l.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', fontSize: 12, color: 'var(--brand-text)', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={!!activeOv[l.id]} onChange={(e) => toggleOverlay(l, e.target.checked)} />
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.name || l.id}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {status && (
+              <div style={{ padding: '6px 10px', background: 'var(--brand-bg-2)', border: '1px solid var(--brand-line)', borderRadius: 'var(--r-md)', fontSize: 11, color: phase === 'error' ? 'var(--brand-error, #f88)' : 'var(--brand-muted)' }}>{status}</div>
+            )}
+          </div>
+        </div>
+
+        <footer style={{ padding: '12px 16px', borderTop: '1px solid var(--brand-line)', display: 'flex', justifyContent: 'flex-end', gap: 8, position: 'sticky', bottom: 0, background: 'var(--brand-surface)' }}>
+          <Button variant="ghost" onClick={onClose} disabled={phase === 'saving'}>Cancel</Button>
+          <Button variant="primary" onClick={save} loading={phase === 'saving'} disabled={phase !== 'ready' && phase !== 'saving'}>
+            {firstTime ? '✓ Confirm + start ingest' : 'Save'}
+          </Button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 function IfcUploader({ project, onUploaded, push }) {
   const fileRef = React.useRef(null);
   const [busy, setBusy] = React.useState(false);
@@ -347,23 +709,117 @@ function IfcUploader({ project, onUploaded, push }) {
   );
 }
 
+// ─── Progress cell — thin bar + stage message for in-flight ingests ──────
+function _IngestProgressCell({ row }) {
+  if (row.has_tileset) return <Pill tone="ok" dot>ready</Pill>;
+  if (row.stage === 'failed') {
+    return (
+      <div>
+        <Pill tone="error" dot>failed</Pill>
+        {row.error && <div className="micro" style={{ marginTop: 3, color: 'var(--brand-error, #f88)', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' }} title={row.error}>{row.error}</div>}
+      </div>
+    );
+  }
+  const awaiting = row.stage === 'awaiting_placement';
+  const pct = Math.max(0, Math.min(100, Number(row.percent) || 0));
+  const fill = awaiting ? 'linear-gradient(90deg, #f5a042, #f5a042)' : 'linear-gradient(90deg, var(--brand-bim), var(--brand-gis))';
+  return (
+    <div style={{ minWidth: 160 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ flex: 1, height: 6, background: 'rgba(255,255,255,0.08)', borderRadius: 3, overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: `${pct}%`, background: fill, transition: 'width .4s' }} />
+        </div>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: awaiting ? '#f5a042' : 'var(--brand-muted)', minWidth: 32, textAlign: 'right' }}>
+          {awaiting ? '⏸' : `${pct}%`}
+        </span>
+      </div>
+      <div className="micro" style={{ marginTop: 2, color: awaiting ? '#f5a042' : 'var(--brand-muted)' }}>{row.message || row.stage || 'pending'}</div>
+    </div>
+  );
+}
+
 function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refresh }) {
+  const [pollMap, setPollMap] = React.useState({});           // model_id → ingest item
+  const [editor, setEditor]   = React.useState(null);          // {model_id, firstTime} or null
+  const autoOpenedRef         = React.useRef(new Set());
+  const pollTimerRef          = React.useRef(null);
+
+  // Stitch poll data into the rows the parent passed in. Each poll-item
+  // wins over the static row so a fresh stage / percent / error bubbles up
+  // without waiting for a full /projects/{id} reload.
+  const rows = React.useMemo(() => models.map(m => {
+    const p = pollMap[m.model_id];
+    if (!p) return m;
+    return { ...m,
+      stage:   p.stage,
+      percent: p.percent,
+      message: p.message,
+      error:   p.error,
+      has_tileset: p.stage === 'ready' ? true : m.has_tileset,
+    };
+  }), [models, pollMap]);
+
+  const inflight = React.useMemo(() => rows.some(r => !r.has_tileset && r.stage !== 'failed'), [rows]);
+
+  const pollOnce = React.useCallback(async () => {
+    pollTimerRef.current = null;
+    if (!project || !project.id) return;
+    try {
+      const res = await _api(`/projects/${project.id}/ingest-status`);
+      const items = res.items || [];
+      const next = {};
+      let stillInflight = false, justFinished = false;
+      for (const it of items) {
+        next[it.model_id] = it;
+        if (it.stage === 'ready') {
+          // Trigger a project refresh so has_tileset flips + entities update.
+          justFinished = true;
+        } else if (it.stage !== 'failed') {
+          stillInflight = true;
+        }
+        // Auto-open the placement editor the first time a model lands in
+        // awaiting_placement (matches legacy ProposGeoEditor behaviour).
+        if (it.stage === 'awaiting_placement' && !autoOpenedRef.current.has(it.model_id)) {
+          autoOpenedRef.current.add(it.model_id);
+          setEditor({ model_id: it.model_id, firstTime: true });
+        }
+      }
+      setPollMap(next);
+      if (justFinished) setTimeout(refresh, 600);
+      if (stillInflight) pollTimerRef.current = setTimeout(pollOnce, 2500);
+    } catch {
+      pollTimerRef.current = setTimeout(pollOnce, 5000);
+    }
+  }, [project && project.id, refresh]);
+
+  // Arm / disarm the poller based on whether anything is in flight.
+  React.useEffect(() => {
+    if (inflight && !pollTimerRef.current) pollOnce();
+    return () => {
+      if (pollTimerRef.current) { clearTimeout(pollTimerRef.current); pollTimerRef.current = null; }
+    };
+  }, [inflight, pollOnce]);
+
+  const adjustLink = (r) => (
+    <a href="#" onClick={(e) => { e.preventDefault(); setEditor({ model_id: r.model_id, firstTime: r.stage === 'awaiting_placement' }); }}
+       title={r.stage === 'awaiting_placement' ? 'Open the placement editor — drag + rotate the footprint' : 'Reposition + rotate the model on the basemap (no re-tiling)'}
+       style={{ padding: '4px 10px', fontSize: 12, color: r.stage === 'awaiting_placement' ? '#f5a042' : 'var(--brand-text)', textDecoration: 'none', border: `1px solid ${r.stage === 'awaiting_placement' ? 'rgba(245,160,66,0.5)' : 'var(--brand-line-strong)'}`, borderRadius: 'var(--r-md)' }}>
+      📐 {r.stage === 'awaiting_placement' ? 'Open editor' : 'Adjust'}
+    </a>
+  );
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <IfcUploader project={project} onUploaded={refresh} push={push} />
+      <IfcUploader project={project} onUploaded={() => { refresh(); pollOnce(); }} push={push} />
       {loading ? (
         <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--brand-muted)' }}><Spinner /><div className="micro" style={{ marginTop: 14 }}>LOADING MODELS</div></div>
-      ) : models.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState icon="⊞" title="No models in this project yet"
           description="Upload an IFC above and the list will populate as the worker builds its tileset." />
       ) : (() => {
         const cols = [
           { key: 'model_id', header: 'Model', sortable: true, render: r => <strong style={{ fontWeight: 600 }}>{r.model_id || r.name || '—'}</strong> },
-          { key: 'status',   header: 'Status', render: r => {
-            if (r.has_tileset) return <Pill tone="ok" dot>ready</Pill>;
-            if (r.status)      return <Pill tone={_toneFor(r.status)} dot={_toneFor(r.status) !== 'neutral'}>{r.status}</Pill>;
-            return <Pill tone="warn" dot>pending</Pill>;
-          } },
+          { key: 'status',   header: 'Status', render: r => <_IngestProgressCell row={r} /> },
           { key: 'entities', header: 'Entities', align: 'end', render: r => <span style={{ fontFamily: 'var(--font-mono)' }}>{(r.entities ?? 0).toLocaleString()}</span> },
           { key: 'geometry_rows', header: 'Geometry', align: 'end', render: r => <span style={{ fontFamily: 'var(--font-mono)' }}>{(r.geometry_rows ?? 0).toLocaleString()}</span> },
           { key: 'work_orders',   header: 'WOs', align: 'end', render: r => <span style={{ fontFamily: 'var(--font-mono)', color: (r.work_orders || 0) > 0 ? 'var(--brand-bim)' : 'var(--brand-faint)' }}>{r.work_orders ?? 0}</span> },
@@ -377,12 +833,21 @@ function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refres
               <a href={`#ar?model=${encodeURIComponent(r.model_id)}`} onClick={(e) => { e.preventDefault(); window.location.hash = `ar?model=${encodeURIComponent(r.model_id)}`; }}
                  style={{ padding: '4px 10px', fontSize: 12, color: 'var(--brand-text)', textDecoration: 'none', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>AR/VR</a>
             )}
+            {(r.stage === 'awaiting_placement' || r.has_tileset) && adjustLink(r)}
           </React.Fragment>
         );
         return mobile
-          ? <StackedCardTable columns={cols} rows={models} rowKey={r => r.model_id || r.id} actions={actions} />
-          : <DataTable columns={cols} rows={models} rowKey={r => r.model_id || r.id} caption={`${models.length} model${models.length === 1 ? '' : 's'}`} actions={actions} />;
+          ? <StackedCardTable columns={cols} rows={rows} rowKey={r => r.model_id || r.id} actions={actions} />
+          : <DataTable columns={cols} rows={rows} rowKey={r => r.model_id || r.id} caption={`${rows.length} model${rows.length === 1 ? '' : 's'}${inflight ? ' · polling' : ''}`} actions={actions} />;
       })()}
+
+      <PlacementEditor
+        open={!!editor}
+        modelId={editor && editor.model_id}
+        projectId={project.id}
+        firstTime={!!(editor && editor.firstTime)}
+        onClose={() => { setEditor(null); refresh(); pollOnce(); }}
+        push={push} />
     </div>
   );
 }
