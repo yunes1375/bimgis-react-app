@@ -341,57 +341,300 @@ function LayerPreviewMap({ project, overlays, height = 380 }) {
 
 // ─── Tab panels ───────────────────────────────────────────────────────────
 
-function OverviewPanel({ project, models, modelsLoading, overlays, overlaysLoading }) {
-  const ready    = models.filter(m => _toneFor(m.status) === 'ok').length;
-  const pending  = models.filter(m => _toneFor(m.status) === 'warn').length;
-  const failed   = models.filter(m => _toneFor(m.status) === 'error').length;
-  const totalModels = Math.max(project.model_count || 0, models.length);
+// ─── Relative-time helper for activity feed / "last run" badges ──────────
+function _fmtAgo(iso) {
+  if (!iso) return '—';
+  const t = new Date(iso).getTime();
+  if (!isFinite(t)) return '—';
+  const diff = (Date.now() - t) / 1000;
+  if (diff < 0)        return new Date(iso).toLocaleDateString('en-GB');
+  if (diff < 60)       return 'just now';
+  if (diff < 3600)     return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400)    return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 86400*7)  return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+}
+
+// ─── Inline horizontal stacked bar used for the WO breakdown ─────────────
+function _StackBar({ segments, height = 8 }) {
+  const total = segments.reduce((s, x) => s + (x.count || 0), 0) || 1;
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <div className="bp-proj-kpis" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-        <KpiTile label="Models" value={totalModels} />
-        <KpiTile label="Ready"   value={modelsLoading ? '…' : ready}   tone="ok" />
-        <KpiTile label="Pending" value={modelsLoading ? '…' : pending} tone="warn" />
-        <KpiTile label="Failed"  value={modelsLoading ? '…' : failed}  tone="error" />
+    <div style={{ display: 'flex', width: '100%', height, borderRadius: height, overflow: 'hidden', background: 'rgba(255,255,255,0.06)' }}>
+      {segments.map(s => (s.count || 0) > 0 && (
+        <div key={s.key} title={`${s.label}: ${s.count}`}
+          style={{ flex: s.count / total, background: s.color, transition: 'flex .35s' }} />
+      ))}
+    </div>
+  );
+}
+
+function OverviewPanel({ project, who, models, modelsLoading, overlays, overlaysLoading,
+                        onJumpTo, onOpenMap, onOpenAR }) {
+  const [stats,  setStats]  = React.useState(null);   // /work-orders/stats
+  const [kpis,   setKpis]   = React.useState(null);   // /work-orders/kpis
+  const [teams,  setTeams]  = React.useState(null);   // [{id,name,status,member_count,...}]
+  const [lastRun,setLastRun]= React.useState(null);   // last entry from /optimize/runs
+  const [shares, setShares] = React.useState(null);   // { people, is_owner }
+
+  React.useEffect(() => {
+    if (!project || !project.id) return;
+    let cancelled = false;
+    const safe = (p) => _api(p).then(d => cancelled ? null : d).catch(() => null);
+    Promise.all([
+      safe(`/projects/${project.id}/work-orders/stats`),
+      safe(`/projects/${project.id}/work-orders/kpis`),
+      safe(`/projects/${project.id}/teams`),
+      safe(`/projects/${project.id}/optimize/runs`),
+      safe(`/projects/${project.id}/shares`),
+    ]).then(([s, k, t, r, sh]) => {
+      if (cancelled) return;
+      setStats(s);
+      setKpis(k);
+      setTeams(t && (t.teams || []));
+      setLastRun(r && (r.items || [])[0] || null);
+      setShares(sh);
+    });
+    return () => { cancelled = true; };
+  }, [project && project.id]);
+
+  // ── Derived KPI numbers ─────────────────────────────────────────────────
+  const ready       = models.filter(m => m.has_tileset || _toneFor(m.status) === 'ok').length;
+  const pending     = models.filter(m => !m.has_tileset && _toneFor(m.status) !== 'error').length;
+  const failed      = models.filter(m => _toneFor(m.status) === 'error').length;
+  const totalModels = Math.max(project.model_count || 0, models.length);
+
+  const byStatus    = (stats && stats.by_status)   || {};
+  const byPriority  = (stats && stats.by_priority) || {};
+  const byType      = (stats && stats.by_type)     || {};
+  const totalWOs    = (stats && stats.total) != null ? stats.total
+                    : Object.values(byStatus).reduce((s, n) => s + (n || 0), 0);
+  const openWOs     = byStatus.open || 0;
+  const inProgWOs   = byStatus.in_progress || 0;
+  const closedWOs   = (byStatus.completed || 0) + (byStatus.cancelled || 0);
+  const urgentOpen  = (stats && stats.urgent_open) != null ? stats.urgent_open
+                    : (byPriority.urgent || 0);
+
+  const teamsActive = (teams || []).filter(t => (t.status || 'active') === 'active').length;
+  const teamsTotal  = (teams || []).length;
+  const teamsMembers= (teams || []).reduce((s, t) => s + (Number(t.member_count) || 0), 0);
+
+  const mttr = kpis && kpis.mttr_hours != null ? `${kpis.mttr_hours.toFixed(1)} h`
+             : kpis && kpis.mttr_seconds != null ? `${(kpis.mttr_seconds / 3600).toFixed(1)} h` : '—';
+  const onTime = kpis && kpis.on_time_pct != null ? `${Math.round(kpis.on_time_pct * (kpis.on_time_pct <= 1 ? 100 : 1))}%` : '—';
+  const costVar = kpis && kpis.cost_variance_pct != null ? `${kpis.cost_variance_pct > 0 ? '+' : ''}${kpis.cost_variance_pct.toFixed(0)}%`
+                : kpis && kpis.cost_variance != null ? `${kpis.cost_variance > 0 ? '+' : ''}${kpis.cost_variance.toFixed(0)}%` : '—';
+
+  const lastRunDist = lastRun && (lastRun.total_distance_m || (lastRun.summary && lastRun.summary.total_distance_m));
+  const lastRunRoutes = lastRun && (lastRun.routes_count || (lastRun.summary && lastRun.summary.routes_count));
+
+  // ── Recent activity feed — synthesised from data we already have ───────
+  const activity = [];
+  models.slice(0, 4).forEach(m => {
+    if (m.has_tileset) activity.push({ when: m.updated_at || m.created_at, kind: 'model', tone: 'ok',  text: `Model "${m.model_id}" ready` });
+    else if (_toneFor(m.status) === 'error') activity.push({ when: m.updated_at || m.created_at, kind: 'model', tone: 'error', text: `Model "${m.model_id}" failed to ingest` });
+    else activity.push({ when: m.created_at, kind: 'model', tone: 'warn', text: `Model "${m.model_id}" — ${m.status || 'pending'}` });
+  });
+  (teams || []).slice(0, 3).forEach(t => activity.push({ when: t.created_at, kind: 'team', tone: 'info', text: `Team "${t.name}" added` }));
+  (overlays || []).slice(0, 3).forEach(l => activity.push({ when: l.created_at || l.updated_at, kind: 'gis', tone: 'gis', text: `GIS layer "${l.name}" added` }));
+  if (lastRun) activity.push({ when: lastRun.created_at || lastRun.finished_at, kind: 'run', tone: 'bim', text: `Optimize run · ${lastRunRoutes != null ? lastRunRoutes + ' routes' : 'completed'}` });
+  if (project.created_at) activity.push({ when: project.created_at, kind: 'project', tone: 'neutral', text: 'Project created' });
+  activity.sort((a, b) => (new Date(b.when || 0) - new Date(a.when || 0))).splice(8);
+
+  const TONE_DOT = { ok: '#6cd8a8', warn: '#f5a042', error: '#f06868', info: '#6a9be8', gis: 'var(--brand-gis, #ff9a52)', bim: 'var(--brand-bim, #36e0d4)', neutral: '#9aa7bd' };
+
+  // ── Status segments for the stack bar ───────────────────────────────────
+  const statusSegments = [
+    { key: 'open',        label: 'Open',         count: byStatus.open || 0,        color: '#6a9be8' },
+    { key: 'in_progress', label: 'In progress',  count: byStatus.in_progress || 0, color: '#f5a042' },
+    { key: 'completed',   label: 'Completed',    count: byStatus.completed || 0,   color: '#6cd8a8' },
+    { key: 'cancelled',   label: 'Cancelled',    count: byStatus.cancelled || 0,   color: '#7a8aa8' },
+  ];
+
+  const QuickActionBtn = ({ icon, label, onClick }) => (
+    <button type="button" onClick={onClick}
+      style={{
+        flex: '1 1 110px', display: 'inline-flex', alignItems: 'center', gap: 8,
+        padding: '8px 12px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)',
+        border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)',
+        fontFamily: 'inherit', fontSize: 12, cursor: 'pointer', textAlign: 'left',
+        transition: 'background 120ms, border-color 120ms',
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(54,224,212,0.08)'; e.currentTarget.style.borderColor = 'var(--brand-bim)'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--brand-bg-2)'; e.currentTarget.style.borderColor = 'var(--brand-line-strong)'; }}>
+      <span style={{ color: 'var(--brand-bim)', fontSize: 14 }}>{icon}</span>
+      <span>{label}</span>
+    </button>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* ── Quick actions strip ─────────────────────────────────────── */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <QuickActionBtn icon="↥" label="Upload IFC"       onClick={() => onJumpTo && onJumpTo('models')} />
+        <QuickActionBtn icon="⊞" label="Open 3D viewer"   onClick={() => onOpenMap && onOpenMap()} />
+        <QuickActionBtn icon="◎" label="AR / VR"          onClick={() => onOpenAR && onOpenAR()} />
+        <QuickActionBtn icon="≡" label="Work orders"      onClick={() => onJumpTo && onJumpTo('orders')} />
+        <QuickActionBtn icon="▶" label="Run optimiser"    onClick={() => onJumpTo && onJumpTo('optimize')} />
+        <QuickActionBtn icon="◇" label="Manage layers"    onClick={() => onJumpTo && onJumpTo('overlays')} />
       </div>
-      <div className="bp-proj-overview" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.6fr) minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
-        <Card title="GIS overlays">
-          {overlaysLoading
-            ? <div style={{ padding: 24, textAlign: 'center', color: 'var(--brand-muted)' }}><Spinner size="sm" /></div>
-            : overlays.length === 0
-              ? <div style={{ padding: 24, textAlign: 'center', color: 'var(--brand-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>No overlays. Open the <strong>GIS overlays</strong> tab to add one.</div>
-              : (
-                <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-                  {overlays.slice(0, 5).map((l, i) => (
-                    <li key={l.id || l.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderTop: i === 0 ? 'none' : '1px solid var(--brand-line)' }}>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <span style={{ width: 8, height: 8, borderRadius: 'var(--r-sm)', background: 'var(--brand-gis)' }} />
-                        <span style={{ fontSize: 'var(--fs-small)' }}>{l.name || l.id}</span>
-                      </span>
-                      <span className="micro">{l.source || l.layer_type || '—'}</span>
-                    </li>
-                  ))}
-                </ul>
+
+      {/* ── Top KPI band: 5 tiles ───────────────────────────────────── */}
+      <div className="bp-proj-kpis" style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
+        <KpiTile label="Models"
+          value={modelsLoading ? '…' : totalModels}
+          hint={`${ready} ready · ${pending} pending${failed ? ` · ${failed} failed` : ''}`}
+          tone={failed ? 'error' : (pending ? 'warn' : 'ok')} />
+        <KpiTile label="Open WOs"
+          value={stats == null ? '…' : openWOs}
+          hint={urgentOpen > 0 ? `${urgentOpen} urgent` : (inProgWOs ? `${inProgWOs} in progress` : 'no urgent')}
+          tone={urgentOpen > 0 ? 'error' : (openWOs > 0 ? 'warn' : 'ok')} />
+        <KpiTile label="Teams"
+          value={teams == null ? '…' : teamsActive}
+          hint={teams == null ? ' ' : `${teamsTotal} total · ${teamsMembers} member${teamsMembers === 1 ? '' : 's'}`}
+          tone={teamsActive > 0 ? 'ok' : 'neutral'} />
+        <KpiTile label="GIS overlays"
+          value={overlaysLoading ? '…' : (overlays.length || 0)}
+          hint={(overlays || []).filter(l => l.visible).length + ' visible'}
+          tone={(overlays && overlays.length) ? 'bim' : 'neutral'} />
+        <KpiTile label="Last optimize"
+          value={lastRun ? _fmtAgo(lastRun.created_at || lastRun.finished_at) : '—'}
+          hint={lastRun && lastRunDist != null ? `${_fmtDist(lastRunDist)}${lastRunRoutes != null ? ` · ${lastRunRoutes} routes` : ''}` : 'never run'}
+          tone={lastRun ? 'gis' : 'neutral'} />
+      </div>
+
+      {/* ── Work orders breakdown ───────────────────────────────────── */}
+      <Card title="Work orders breakdown"
+        subtitle={stats == null ? 'loading…' : `${totalWOs} work order${totalWOs === 1 ? '' : 's'} · ${closedWOs} closed`}
+        action={<Button size="sm" variant="ghost" onClick={() => onJumpTo && onJumpTo('orders')}>Open Work orders →</Button>}>
+        {stats == null ? (
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--brand-muted)' }}><Spinner size="sm" /></div>
+        ) : totalWOs === 0 ? (
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--brand-muted)', fontSize: 13 }}>
+            No work orders yet. Create them from the 3D viewer's right-rail inspector — pick an entity, then "+ new WO".
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)', gap: 16 }} className="bp-overview-wo">
+            {/* Status stack bar + pill labels */}
+            <div>
+              <div className="micro" style={{ marginBottom: 6 }}>BY STATUS</div>
+              <_StackBar segments={statusSegments} />
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+                {statusSegments.map(s => s.count > 0 && (
+                  <span key={s.key} style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 5,
+                    padding: '2px 9px', borderRadius: 99, fontSize: 11,
+                    background: 'rgba(255,255,255,0.05)', border: `1px solid ${s.color}55`, color: 'var(--brand-text)',
+                  }}>
+                    <span style={{ width: 6, height: 6, borderRadius: 99, background: s.color }} />
+                    {s.label} {s.count}
+                  </span>
+                ))}
+              </div>
+
+              <div className="micro" style={{ marginTop: 16, marginBottom: 6 }}>BY PRIORITY</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {['urgent','high','normal','low'].map(p => (byPriority[p] || 0) > 0 && (
+                  <Pill key={p} tone={_PWO_PRIO_TONE[p] || 'neutral'}>{p}: {byPriority[p]}</Pill>
+                ))}
+              </div>
+
+              {Object.keys(byType).length > 0 && (
+                <React.Fragment>
+                  <div className="micro" style={{ marginTop: 16, marginBottom: 6 }}>BY TYPE</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {Object.entries(byType).map(([k, v]) => v > 0 && (
+                      <Pill key={k} tone="info">{k}: {v}</Pill>
+                    ))}
+                  </div>
+                </React.Fragment>
               )}
+            </div>
+
+            {/* Three KPI tiles — performance side */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <KpiTile label="MTTR"          value={mttr}    hint="mean time to repair" tone={mttr !== '—' ? 'ok' : 'neutral'} />
+              <KpiTile label="On-time close" value={onTime}  hint="% closed before due"  tone={onTime !== '—' ? 'ok' : 'neutral'} />
+              <KpiTile label="Cost variance" value={costVar} hint="actual vs. estimated" tone={costVar !== '—' && costVar.startsWith('+') ? 'warn' : 'ok'} />
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* ── Activity feed + project details + GIS summary ──────────── */}
+      <div className="bp-proj-overview" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
+        <Card title="Recent activity" subtitle={`last ${activity.length} event${activity.length === 1 ? '' : 's'}`}>
+          {activity.length === 0 ? (
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--brand-muted)', fontSize: 13 }}>
+              No activity yet. Upload an IFC, add a team, or create a work order to populate this feed.
+            </div>
+          ) : (
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+              {activity.map((a, i) => (
+                <li key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderTop: i === 0 ? 'none' : '1px solid var(--brand-line)' }}>
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: TONE_DOT[a.tone] || TONE_DOT.neutral, flexShrink: 0 }} />
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: 'var(--brand-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.text}</span>
+                  <span className="micro" style={{ flexShrink: 0 }}>{_fmtAgo(a.when)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </Card>
-        <Card title="Project details" variant="accent">
-          <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: 'auto 1fr', rowGap: 12, columnGap: 16 }}>
-            {[
-              ['ID',           project.id || '—'],
-              ['Owner',        project.owner_email || '—'],
-              ['Created',      _fmtDate(project.created_at)],
-              ['Updated',      _fmtDate(project.updated_at)],
-              ['Models',       String(project.model_count ?? models.length ?? 0)],
-              ['Description',  project.description || '—'],
-            ].map(([k, v]) => (
-              <React.Fragment key={k}>
-                <dt className="micro" style={{ alignSelf: 'center' }}>{k}</dt>
-                <dd style={{ margin: 0, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-small)', color: 'var(--brand-text)', textAlign: 'right', wordBreak: 'break-all' }}>{v}</dd>
-              </React.Fragment>
-            ))}
-          </dl>
-        </Card>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
+          <Card title="Project details" variant="accent" dense>
+            <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: 'auto 1fr', rowGap: 10, columnGap: 14 }}>
+              {[
+                ['Owner',        project.owner_email || '—'],
+                ['Created',      _fmtDate(project.created_at)],
+                ['Updated',      _fmtDate(project.updated_at)],
+                ['Models',       String(project.model_count ?? models.length ?? 0)],
+                ['Collaborators',shares ? String((shares.people || []).length) : '…'],
+                ['ID',           project.id ? `${project.id.slice(0, 8)}…` : '—'],
+              ].map(([k, v]) => (
+                <React.Fragment key={k}>
+                  <dt className="micro" style={{ alignSelf: 'center' }}>{k}</dt>
+                  <dd style={{ margin: 0, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-small)', color: 'var(--brand-text)', textAlign: 'right', wordBreak: 'break-all' }}>{v}</dd>
+                </React.Fragment>
+              ))}
+            </dl>
+            {project.description && (
+              <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--brand-line)', fontSize: 12, color: 'var(--brand-muted)', lineHeight: 1.5 }}>
+                {project.description}
+              </div>
+            )}
+          </Card>
+
+          <Card title="GIS overlays" dense
+            action={<Button size="sm" variant="ghost" onClick={() => onJumpTo && onJumpTo('overlays')}>Manage →</Button>}>
+            {overlaysLoading
+              ? <div style={{ padding: 16, textAlign: 'center', color: 'var(--brand-muted)' }}><Spinner size="sm" /></div>
+              : overlays.length === 0
+                ? <div style={{ padding: 16, textAlign: 'center', color: 'var(--brand-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>No overlays.</div>
+                : (
+                  <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                    {overlays.slice(0, 4).map((l, i) => (
+                      <li key={l.id || l.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderTop: i === 0 ? 'none' : '1px solid var(--brand-line)', gap: 8 }}>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                          <span style={{ width: 6, height: 6, borderRadius: 'var(--r-sm)', background: l.visible ? 'var(--brand-gis)' : 'var(--brand-faint)', flexShrink: 0 }} />
+                          <span style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.name || l.id}</span>
+                        </span>
+                        <span className="micro" style={{ flexShrink: 0 }}>{l.feature_count != null ? `${l.feature_count.toLocaleString()}` : (l.layer_type || '—')}</span>
+                      </li>
+                    ))}
+                    {overlays.length > 4 && <li style={{ padding: '8px 0', borderTop: '1px solid var(--brand-line)', textAlign: 'center' }} className="micro">+ {overlays.length - 4} more</li>}
+                  </ul>
+                )}
+          </Card>
+        </div>
       </div>
+
+      <style>{`
+        @media (max-width: 880px) {
+          .bp-proj-kpis     { grid-template-columns: repeat(2, 1fr) !important; }
+          .bp-proj-overview { grid-template-columns: 1fr !important; }
+          .bp-overview-wo   { grid-template-columns: 1fr !important; }
+        }
+      `}</style>
     </div>
   );
 }
@@ -2795,7 +3038,7 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenAR,
           <Tabs items={items} value={tab} onChange={setTab} />
         </div>
 
-        {tab === 'overview'  && <OverviewPanel project={project} models={models.items} modelsLoading={models.loading} overlays={overlays.items} overlaysLoading={overlays.loading} />}
+        {tab === 'overview'  && <OverviewPanel project={project} who={who} models={models.items} modelsLoading={models.loading} overlays={overlays.items} overlaysLoading={overlays.loading} onJumpTo={setTab} onOpenMap={onOpenMap} onOpenAR={onOpenAR} />}
         {tab === 'models'    && <ModelsPanel mobile={mobile} models={models.items} loading={models.loading} project={project} onOpenMap={onOpenMap} onOpenAR={onOpenAR} push={push} refresh={loadModels} who={who} />}
         {tab === 'teams'     && <TeamsPanel project={project} push={push} />}
         {tab === 'orders'    && <OrdersPanel project={project} push={push} onOpenMap={onOpenMap} />}
