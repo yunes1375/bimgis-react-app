@@ -127,8 +127,9 @@ function App() {
       {screen === 'ar' && authed && (
         <window.ARScreen who={who} nav={nav} onMenu={onMenu}
           modelId={selectedModel}
+          project={project}
           onPickModel={setSelectedModel}
-          onBack={() => go('models')} onSignOut={onSignOut} />
+          onBack={() => go(project ? 'project' : 'models')} onSignOut={onSignOut} />
       )}
       {screen === 'account' && authed && (
         <window.AccountScreen who={who} nav={nav} onMenu={onMenu} onSignOut={onSignOut} />

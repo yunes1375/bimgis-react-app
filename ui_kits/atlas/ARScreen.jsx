@@ -68,9 +68,10 @@ function StatTile({ label, value, hint }) {
   );
 }
 
-function ARScreen({ who, nav, onMenu, onBack, model: initialModel }) {
-  const [models, setModels] = React.useState({ loading: true, error: null, items: [] });
-  const [picked, setPicked] = React.useState(initialModel || null);
+function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
+  const [models, setModels]   = React.useState({ loading: true, error: null, items: [], allItems: [], scope: 'all' });
+  const [picked, setPicked]   = React.useState(null);
+  const [showAll, setShowAll] = React.useState(false);   // user-overrides project scope
   const [glbSize, setGlbSize] = React.useState(null);
   const [error, setError]     = React.useState(null);
   const [toasts, setToasts]   = React.useState([]);
@@ -83,23 +84,44 @@ function ARScreen({ who, nav, onMenu, onBack, model: initialModel }) {
     setTimeout(() => setToasts(ts => ts.filter(x => x.id !== id)), 3600);
   };
 
+  // Load models; scope to project.model_ids when a project context is
+  // present (clicked AR/VR from inside a project's Models tab) unless
+  // the user overrode with "Show all models".
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const data = await _api('/models');
         if (cancelled) return;
-        const items = (data.models || []).filter(m => m.has_tileset);
-        setModels({ loading: false, error: null, items });
-        // Auto-pick first if nothing was passed in via prop.
-        if (!picked && items.length) setPicked(items[0]);
+        const allReady = (data.models || []).filter(m => m.has_tileset);
+        let items = allReady;
+        let scope = 'all';
+        if (project && project.id && !showAll) {
+          try {
+            const proj = await _api(`/projects/${project.id}`);
+            const ids = new Set(proj.model_ids || []);
+            items = allReady.filter(m => ids.has(m.model_id));
+            scope = 'project';
+          } catch { /* fall through to global list */ }
+        }
+        if (cancelled) return;
+        setModels({ loading: false, error: null, items, allItems: allReady, scope });
+
+        // Prefer the prop-passed modelId; fall back to the first item.
+        // Look it up across the FULL list so a deep-link to a model that
+        // happens to belong to a different project still resolves.
+        if (modelId) {
+          const hit = items.find(m => m.model_id === modelId) || allReady.find(m => m.model_id === modelId);
+          if (hit) { setPicked(hit); return; }
+        }
+        setPicked(prev => prev || items[0] || null);
       } catch (err) {
-        if (!cancelled) setModels({ loading: false, error: err.message, items: [] });
+        if (!cancelled) setModels({ loading: false, error: err.message, items: [], allItems: [], scope: 'all' });
       }
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [project && project.id, showAll, modelId]);
 
   // Fetch GLB size via HEAD whenever the picked model changes.
   React.useEffect(() => {
@@ -179,9 +201,17 @@ function ARScreen({ who, nav, onMenu, onBack, model: initialModel }) {
             <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--brand-muted)', gap: 10 }}>
               {models.loading ? <Spinner size="lg" /> : (
                 <React.Fragment>
-                  <div className="micro">NO MODELS WITH TILESETS</div>
+                  <div className="micro">
+                    {models.scope === 'project' && project
+                      ? `NO TILESET-READY MODELS IN ${project.name.toUpperCase()}`
+                      : 'NO MODELS WITH TILESETS'}
+                  </div>
                   <p style={{ fontSize: 13, maxWidth: 320, textAlign: 'center', margin: 0 }}>
-                    {models.error || 'Upload an IFC from a project page and let the worker build its tileset, then come back.'}
+                    {models.error || (
+                      models.scope === 'project' && project && models.allItems.length > 0
+                        ? <>This project has no tileset yet. {models.allItems.length} model{models.allItems.length === 1 ? '' : 's'} elsewhere — <button onClick={() => setShowAll(true)} style={{ background: 'none', border: 'none', color: 'var(--brand-bim)', textDecoration: 'underline', cursor: 'pointer', padding: 0, font: 'inherit' }}>show all</button>?</>
+                        : 'Upload an IFC from a project page and let the worker build its tileset, then come back.'
+                    )}
                   </p>
                 </React.Fragment>
               )}
@@ -246,7 +276,20 @@ function ARScreen({ who, nav, onMenu, onBack, model: initialModel }) {
           </div>
 
           {/* Model picker */}
-          <Card title="Pick a model" dense subtitle={models.loading ? 'loading…' : `${models.items.length} model${models.items.length === 1 ? '' : 's'} with tilesets`}>
+          <Card title="Pick a model" dense
+            subtitle={models.loading ? 'loading…' :
+              models.scope === 'project' && project
+                ? `${models.items.length} of ${project.name} · ${models.allItems.length - models.items.length} more globally`
+                : `${models.items.length} model${models.items.length === 1 ? '' : 's'} with tilesets`}
+            action={
+              project && project.id && (
+                <Button size="sm" variant="ghost"
+                  onClick={() => setShowAll(s => !s)}
+                  title={showAll ? `Filter back to ${project.name}` : 'List every model with a tileset across all projects'}>
+                  {showAll ? `↩ Filter to ${project.name}` : 'Show all models'}
+                </Button>
+              )
+            }>
             {models.loading ? (
               <div style={{ padding: 24, textAlign: 'center' }}><Spinner size="sm" /></div>
             ) : models.items.length === 0 ? (
