@@ -101,7 +101,7 @@ function App() {
       )}
       {screen === 'project' && authed && (
         <window.ProjectScreen project={project} who={who} nav={nav} onMenu={onMenu}
-          onBack={() => go('projects')} onOpenMap={() => go('map')} onOpenModels={() => go('models')}
+          onBack={() => go('projects')} onOpenMap={openMapWithModel} onOpenModels={() => go('models')}
           onSignOut={onSignOut} />
       )}
       {screen === 'map' && authed && (
