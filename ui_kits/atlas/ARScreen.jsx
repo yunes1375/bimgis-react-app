@@ -54,6 +54,59 @@ function CapPill({ label, state }) {
   );
 }
 
+// ─── Circular progress overlay shown while a model is loading ────────────
+function _CircularLoader({ value, totalBytes, modelId }) {
+  const v = Math.max(0, Math.min(1, value));
+  const pct = Math.round(v * 100);
+  const r = 56;
+  const cir = 2 * Math.PI * r;
+  const offset = cir * (1 - v);
+  const mb = (totalBytes && totalBytes > 0)
+    ? `${(v * totalBytes / 1e6).toFixed(1)} / ${(totalBytes / 1e6).toFixed(1)} MB`
+    : null;
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
+    }}>
+      <svg width="160" height="160" viewBox="0 0 160 160" aria-label="loading model">
+        <defs>
+          <linearGradient id="ar-loader-grad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%"   stopColor="#36e0d4" />
+            <stop offset="100%" stopColor="#5fc6ff" />
+          </linearGradient>
+        </defs>
+        <circle cx="80" cy="80" r={r} fill="none"
+                stroke="rgba(255,255,255,0.10)" strokeWidth="8" />
+        <circle cx="80" cy="80" r={r} fill="none"
+                stroke="url(#ar-loader-grad)" strokeWidth="8" strokeLinecap="round"
+                strokeDasharray={cir} strokeDashoffset={offset}
+                transform="rotate(-90 80 80)"
+                style={{ transition: 'stroke-dashoffset 200ms ease-out', filter: 'drop-shadow(0 0 6px rgba(54,224,212,0.5))' }} />
+        <text x="80" y="74" textAnchor="middle" fill="#e8ecf1"
+              fontSize="30" fontWeight="700"
+              style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontVariantNumeric: 'tabular-nums' }}>
+          {pct}%
+        </text>
+        <text x="80" y="100" textAnchor="middle" fill="#7fece4"
+              fontSize="9" letterSpacing="0.18em"
+              style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', textTransform: 'uppercase' }}>
+          Loading
+        </text>
+      </svg>
+      <div style={{ textAlign: 'center', maxWidth: 280 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: '#e8ecf1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {modelId}
+        </div>
+        {mb && (
+          <div style={{ marginTop: 6, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'rgba(127,236,228,0.75)', fontVariantNumeric: 'tabular-nums' }}>
+            {mb}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function StatTile({ label, value, hint }) {
   return (
     <div style={{
@@ -71,6 +124,8 @@ function StatTile({ label, value, hint }) {
 function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
   const [models, setModels]   = React.useState({ loading: true, error: null, items: [], allItems: [], scopeName: null });
   const [picked, setPicked]   = React.useState(null);
+  const [loadProgress, setLoadProgress] = React.useState(0);   // 0..1 from <model-viewer> "progress" event
+  const [isLoading, setIsLoading]       = React.useState(false);
   const [projects, setProjects] = React.useState({ loading: true, items: [] });
   // Filter dropdown: '' = all projects, otherwise project.id.
   // Default to the project we arrived from (Models tab click); if AR was
@@ -161,17 +216,43 @@ function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
     return () => { cancelled = true; };
   }, [picked && picked.model_id]);
 
-  // Wire model-viewer error → React state.
+  // Wire model-viewer error / progress / load → React state.
+  // model-viewer fires `progress` while downloading the glTF (event.detail
+  // .totalProgress in [0,1]); we forward that to the circular overlay so
+  // the user sees a bright dial instead of a black void while a heavy
+  // model is downloading.
   React.useEffect(() => {
     const mv = mvRef.current; if (!mv) return;
     const onErr = (e) => {
       const msg = (e.detail && (e.detail.sourceError && e.detail.sourceError.message)) || e.detail || 'unknown error';
       setError(`glTF load failed: ${msg}`);
+      setIsLoading(false);
     };
-    const onLoad = () => setError(null);
-    mv.addEventListener('error', onErr);
-    mv.addEventListener('load', onLoad);
-    return () => { mv.removeEventListener('error', onErr); mv.removeEventListener('load', onLoad); };
+    const onProg = (e) => {
+      const p = (e.detail && typeof e.detail.totalProgress === 'number') ? e.detail.totalProgress : 0;
+      setLoadProgress(p);
+      if (p >= 1) setIsLoading(false);
+    };
+    const onLoad = () => { setLoadProgress(1); setIsLoading(false); setError(null); };
+    mv.addEventListener('error',    onErr);
+    mv.addEventListener('progress', onProg);
+    mv.addEventListener('load',     onLoad);
+    return () => {
+      mv.removeEventListener('error',    onErr);
+      mv.removeEventListener('progress', onProg);
+      mv.removeEventListener('load',     onLoad);
+    };
+  }, [picked && picked.model_id]);
+
+  // Reset the overlay every time the picked model changes — old model
+  // disappears under the loader, new model loads in behind it.
+  React.useEffect(() => {
+    if (!picked || !picked.model_id) { setIsLoading(false); setLoadProgress(0); return; }
+    setLoadProgress(0); setIsLoading(true);
+    // Safety net in case model-viewer doesn't emit a load event for a
+    // cached / instant model — hide the overlay after a quiet beat.
+    const t = setTimeout(() => setIsLoading(false), 8000);
+    return () => clearTimeout(t);
   }, [picked && picked.model_id]);
 
   async function enterVR() {
@@ -283,6 +364,21 @@ function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
             }}>
               <span style={{ color: 'var(--brand-bim)', marginRight: 6 }}>●</span>
               {picked.model_id}
+            </div>
+          )}
+
+          {/* Loading overlay — hides the previous model and shows a bright
+              circular dial + bytes-downloaded readout. Triggered whenever
+              picked.model_id changes; cleared by the "load" / "progress
+              >= 1" event from <model-viewer>. */}
+          {picked && isLoading && (
+            <div style={{
+              position: 'absolute', inset: 0, zIndex: 8,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'rgba(7,11,17,0.86)',
+              backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)',
+            }}>
+              <_CircularLoader value={loadProgress} totalBytes={glbSize} modelId={picked.model_id} />
             </div>
           )}
         </div>
