@@ -450,34 +450,8 @@ function OverviewPanel({ project, who, models, modelsLoading, overlays, overlays
     { key: 'cancelled',   label: 'Cancelled',    count: byStatus.cancelled || 0,   color: '#7a8aa8' },
   ];
 
-  const QuickActionBtn = ({ icon, label, onClick }) => (
-    <button type="button" onClick={onClick}
-      style={{
-        flex: '1 1 110px', display: 'inline-flex', alignItems: 'center', gap: 8,
-        padding: '8px 12px', background: 'var(--brand-bg-2)', color: 'var(--brand-text)',
-        border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)',
-        fontFamily: 'inherit', fontSize: 12, cursor: 'pointer', textAlign: 'left',
-        transition: 'background 120ms, border-color 120ms',
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(54,224,212,0.08)'; e.currentTarget.style.borderColor = 'var(--brand-bim)'; }}
-      onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--brand-bg-2)'; e.currentTarget.style.borderColor = 'var(--brand-line-strong)'; }}>
-      <span style={{ color: 'var(--brand-bim)', fontSize: 14 }}>{icon}</span>
-      <span>{label}</span>
-    </button>
-  );
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* ── Quick actions strip ─────────────────────────────────────── */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <QuickActionBtn icon="↥" label="Upload IFC"       onClick={() => onJumpTo && onJumpTo('models')} />
-        <QuickActionBtn icon="⊞" label="Open 3D viewer"   onClick={() => onOpenMap && onOpenMap()} />
-        <QuickActionBtn icon="◎" label="AR / VR"          onClick={() => onOpenAR && onOpenAR()} />
-        <QuickActionBtn icon="≡" label="Work orders"      onClick={() => onJumpTo && onJumpTo('orders')} />
-        <QuickActionBtn icon="▶" label="Run optimiser"    onClick={() => onJumpTo && onJumpTo('optimize')} />
-        <QuickActionBtn icon="◇" label="Manage layers"    onClick={() => onJumpTo && onJumpTo('overlays')} />
-      </div>
-
       {/* ── Top KPI band: 5 tiles ───────────────────────────────────── */}
       <div className="bp-proj-kpis" style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
         <KpiTile label="Models"
