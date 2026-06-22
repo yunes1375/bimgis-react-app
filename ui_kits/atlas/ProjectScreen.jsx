@@ -1274,7 +1274,10 @@ function WoEditModal({ open, wo, onClose, onSaved, push }) {
 }
 
 function OrdersPanel({ project, push, onOpenMap }) {
-  const mobile = _useIsMobile();
+  // The WO table has 6 cols + actions — even on a 720→1100 laptop the
+  // DataTable overflows horizontally. Collapse to StackedCardTable below
+  // 1100 px (not the usual 720 px) so non-XL viewports never side-scroll.
+  const mobile = _useIsMobile(1100);
   const [filter, setFilter] = React.useState({ model_id: '', status: '', priority: '', type: '', safety: '', assigned_to: '', number: '' });
   const [state, setState]   = React.useState({ items: [], total: 0, has_more: false, loading: true, error: null, offset: 0 });
   const [stats, setStats]   = React.useState(null);
@@ -1351,9 +1354,13 @@ function OrdersPanel({ project, push, onOpenMap }) {
         {r.assigned_to && <div className="micro" style={{ marginTop: 2 }}>{r.assigned_to}</div>}
       </div>
     ) },
-    { key: 'model',  header: 'Model', render: r => <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--brand-muted)' }}>{r.model_id}</span> },
-    { key: 'flags',  header: 'Status · priority · type', render: r => (
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+    { key: 'model',  header: 'Model', render: r => {
+      const mid = r.model_id || '';
+      const short = mid.length > 14 ? mid.slice(0, 12) + '…' : mid;
+      return <span title={mid} style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--brand-muted)' }}>{short}</span>;
+    } },
+    { key: 'flags',  header: 'State', render: r => (
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center', maxWidth: 220 }}>
         <Pill tone={_PWO_STATUS_TONE[r.status] || 'neutral'} dot>{r.status}</Pill>
         <Pill tone={_PWO_PRIO_TONE[r.priority] || 'neutral'}>{r.priority}</Pill>
         <span className="micro">{r.type}</span>
@@ -1430,7 +1437,15 @@ function OrdersPanel({ project, push, onOpenMap }) {
           <React.Fragment>
             {mobile
               ? <StackedCardTable columns={cols} rows={state.items} rowKey={r => r.id} actions={actions} />
-              : <DataTable columns={cols} rows={state.items} rowKey={r => r.id} caption="" actions={actions} />}
+              : (
+                /* DataTable wraps in its own overflow-x:auto, but we
+                   strip column padding via a class so the few cells
+                   that stay (after the model_id truncation) actually
+                   fit within the card on a 1100→1600 viewport. */
+                <div className="bp-wo-table">
+                  <DataTable columns={cols} rows={state.items} rowKey={r => r.id} caption="" actions={actions} />
+                </div>
+              )}
             {state.has_more && (
               <div style={{ padding: 12, textAlign: 'center' }}>
                 <Button size="sm" variant="ghost" onClick={() => load(true)} disabled={state.loading}>
@@ -1444,6 +1459,18 @@ function OrdersPanel({ project, push, onOpenMap }) {
 
       <WoEditModal open={modal.open} wo={modal.wo} onClose={() => setModal({ open: false, wo: null })}
         onSaved={() => { load(false); loadStats(); }} push={push} />
+
+      <style>{`
+        /* Tighten the WO data table so 6 cols + actions fit ≥ 1100 px.
+           DS DataTable still controls structure; we only override
+           horizontal padding + text wrap of its <th>/<td> cells. */
+        .bp-wo-table table { table-layout: auto; width: 100%; }
+        .bp-wo-table th, .bp-wo-table td {
+          padding-inline: 8px !important;
+          word-break: break-word; vertical-align: top;
+        }
+        .bp-wo-table td button { white-space: nowrap; }
+      `}</style>
     </div>
   );
 }
