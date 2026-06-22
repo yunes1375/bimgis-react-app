@@ -230,10 +230,23 @@ function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
     };
     const onProg = (e) => {
       const p = (e.detail && typeof e.detail.totalProgress === 'number') ? e.detail.totalProgress : 0;
-      setLoadProgress(p);
-      if (p >= 1) setIsLoading(false);
+      // Monotonic: model-viewer's totalProgress dips between reasons
+      // ("fetch" → "model-load") and can also skip values entirely, so we
+      // only ever advance the dial forward.
+      setLoadProgress(prev => Math.max(prev, p));
+      if (p >= 1) {
+        // Brief hold at 100% so the user sees completion before fade.
+        setTimeout(() => setIsLoading(false), 250);
+      }
     };
-    const onLoad = () => { setLoadProgress(1); setIsLoading(false); setError(null); };
+    const onLoad = () => {
+      // model-viewer fires "load" before progress hits 1 sometimes —
+      // animate to 100% explicitly so the dial doesn't snap from 70%
+      // to invisible.
+      setLoadProgress(1);
+      setError(null);
+      setTimeout(() => setIsLoading(false), 250);
+    };
     mv.addEventListener('error',    onErr);
     mv.addEventListener('progress', onProg);
     mv.addEventListener('load',     onLoad);
@@ -295,8 +308,8 @@ function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
       <main style={{ flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 380px)', gap: 16, width: '100%', maxWidth: 1280, margin: '0 auto', padding: '20px 16px 32px', boxSizing: 'border-box' }} className="bp-ar-main">
 
         {/* ── model-viewer stage ── */}
-        <div style={{
-          position: 'relative', minHeight: 'min(70vh, 640px)',
+        <div className="bp-ar-stage" style={{
+          position: 'relative',
           borderRadius: 'var(--r-lg)', overflow: 'hidden',
           background: 'radial-gradient(120% 80% at 50% 0%, #15242c 0%, #0c141b 55%, #070b11 100%)',
           border: '1px solid var(--brand-line)',
@@ -505,8 +518,27 @@ function ARScreen({ who, nav, onMenu, onBack, modelId, project }) {
       </ToastStack>
 
       <style>{`
+        /* model-viewer's built-in loading bar collides with our nice
+           circular dial (the user sees both a thin opaque strip across
+           the top AND the dial), so kill it. The element's CSS API
+           exposes these custom properties; both belt + braces. */
+        model-viewer {
+          --progress-bar-height: 0px !important;
+          --progress-bar-color:  transparent !important;
+          --progress-mask:       transparent !important;
+        }
+        model-viewer::part(default-progress-bar) { display: none !important; }
+
+        /* Stage height: cap at 60vh on desktop so it never pushes the
+           right-rail cards off-screen; further shrink on tablets and
+           collapse to single column + smaller stage on phones. */
+        .bp-ar-stage { min-height: min(60vh, 600px); }
         @media (max-width: 880px) {
-          .bp-ar-main { grid-template-columns: 1fr !important; }
+          .bp-ar-main  { grid-template-columns: 1fr !important; padding: 12px !important; gap: 12px !important; }
+          .bp-ar-stage { min-height: 360px !important; }
+        }
+        @media (max-width: 480px) {
+          .bp-ar-stage { min-height: 280px !important; }
         }
       `}</style>
     </div>

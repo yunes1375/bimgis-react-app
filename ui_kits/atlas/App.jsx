@@ -93,7 +93,7 @@ function App() {
   const nav = buildNav(screen);
 
   return (
-    <div style={{ position: 'absolute', inset: 0, overflow: screen === 'map' || screen === 'ar' ? 'hidden' : 'auto' }}>
+    <div style={{ position: 'absolute', inset: 0, overflow: screen === 'map' ? 'hidden' : 'auto' }}>
       {screen === 'landing' && <window.LandingScreen onSignIn={() => go('login')} onMenu={onMenu} nav={nav} />}
 
       {screen === 'login' && <window.LoginScreen onSignIn={onSignedIn} />}
