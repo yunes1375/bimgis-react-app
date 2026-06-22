@@ -738,7 +738,7 @@ function _IngestProgressCell({ row }) {
   );
 }
 
-function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refresh, who }) {
+function ModelsPanel({ mobile, models, loading, project, onOpenMap, onOpenAR, push, refresh, who }) {
   const [pollMap, setPollMap] = React.useState({});           // model_id → ingest item
   const [editor, setEditor]   = React.useState(null);          // {model_id, firstTime} or null
   const [busyId, setBusyId]   = React.useState(null);          // model_id currently being deleted
@@ -877,8 +877,7 @@ function ModelsPanel({ mobile, models, loading, project, onOpenMap, push, refres
                 ? <Button size="sm" variant="secondary" disabled={busy} onClick={() => onOpenMap && onOpenMap(r)}>3D viewer</Button>
                 : <Button size="sm" variant="ghost" disabled>3D viewer</Button>}
               {r.has_tileset && (
-                <a href={`#ar?model=${encodeURIComponent(r.model_id)}`} onClick={(e) => { e.preventDefault(); window.location.hash = `ar?model=${encodeURIComponent(r.model_id)}`; }}
-                   style={{ padding: '4px 10px', fontSize: 12, color: 'var(--brand-text)', textDecoration: 'none', border: '1px solid var(--brand-line-strong)', borderRadius: 'var(--r-md)' }}>AR/VR</a>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => onOpenAR && onOpenAR(r)}>AR/VR</Button>
               )}
               {(r.stage === 'awaiting_placement' || r.has_tileset) && adjustLink(r)}
               {canDestroy && (
@@ -2479,7 +2478,7 @@ function SharingPanel({ project, who, push }) {
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────
-function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenModels }) {
+function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenAR, onOpenModels }) {
   const mobile = _useIsMobile();
   const [tab, setTab] = React.useState('overview');
   const [toasts, setToasts] = React.useState([]);
@@ -2589,7 +2588,7 @@ function ProjectScreen({ project, who, nav, onMenu, onBack, onOpenMap, onOpenMod
         </div>
 
         {tab === 'overview'  && <OverviewPanel project={project} models={models.items} modelsLoading={models.loading} overlays={overlays.items} overlaysLoading={overlays.loading} />}
-        {tab === 'models'    && <ModelsPanel mobile={mobile} models={models.items} loading={models.loading} project={project} onOpenMap={onOpenMap} push={push} refresh={loadModels} who={who} />}
+        {tab === 'models'    && <ModelsPanel mobile={mobile} models={models.items} loading={models.loading} project={project} onOpenMap={onOpenMap} onOpenAR={onOpenAR} push={push} refresh={loadModels} who={who} />}
         {tab === 'teams'     && <TeamsPanel project={project} push={push} />}
         {tab === 'orders'    && <OrdersPanel project={project} push={push} onOpenMap={onOpenMap} />}
         {tab === 'optimize'  && <OptimizePanel project={project} push={push} />}

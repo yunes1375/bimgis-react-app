@@ -4,7 +4,9 @@ const SCREENS = ['landing', 'login', 'projects', 'project', 'map', 'models', 'ad
 const PROTECTED = new Set(['projects', 'project', 'map', 'models', 'admin', 'ar', 'account']);
 
 function readHash() {
-  const h = (window.location.hash || '').replace(/^#/, '').split('/')[0];
+  // First segment by either / or ? so legacy/external links like
+  // "#ar?model=foo" or "#project/abc" both route correctly.
+  const h = (window.location.hash || '').replace(/^#/, '').split(/[/?]/)[0];
   return SCREENS.includes(h) ? h : 'landing';
 }
 
@@ -101,7 +103,7 @@ function App() {
       )}
       {screen === 'project' && authed && (
         <window.ProjectScreen project={project} who={who} nav={nav} onMenu={onMenu}
-          onBack={() => go('projects')} onOpenMap={openMapWithModel} onOpenModels={() => go('models')}
+          onBack={() => go('projects')} onOpenMap={openMapWithModel} onOpenAR={openARWithModel} onOpenModels={() => go('models')}
           onSignOut={onSignOut} />
       )}
       {screen === 'map' && authed && (
